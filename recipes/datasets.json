@@ -1,0 +1,112 @@
+{
+  "math_500": {
+    "dataset_name": "../datasets/MATH-500",
+    "dataset_config": "default",
+    "prompt_column": "problem",
+    "answer_column": "solution",
+    "split": "test"
+  },
+  "gsm8k": {
+    "dataset_name": "../datasets/gsm8k",
+    "dataset_config": "main",
+    "prompt_column": "question",
+    "answer_column": "answer",
+    "split": "test"
+  },
+  "math_lighteval": {
+    "dataset_name": "../datasets/MATH-lighteval",
+    "dataset_config": "default",
+    "prompt_column": "problem",
+    "answer_column": "solution",
+    "split": "train",
+    "instruction_suffix": " Let's think step by step and output the final answer within \\boxed{}."
+  },
+  "aime24": {
+    "dataset_name": "../datasets/aime24",
+    "dataset_config": null,
+    "prompt_column": "problem",
+    "answer_column": "solution",
+    "split": "test",
+    "instruction_suffix": " Let's think step by step and output the final answer within \\boxed{}."
+  },
+  "aime25": {
+    "dataset_name": "../datasets/aime25",
+    "dataset_config": null,
+    "prompt_column": "problem",
+    "answer_column": "answer",
+    "split": "test",
+    "instruction_suffix": " Let's think step by step and output the final answer within \\boxed{}."
+  },
+  "amc23": {
+    "dataset_name": "../datasets/amc23",
+    "dataset_config": null,
+    "prompt_column": "question",
+    "answer_column": "answer",
+    "split": "test",
+    "instruction_suffix": " Let's think step by step and output the final answer within \\boxed{}."
+  },
+
+  "math_ttt": {
+    "dataset_name": "../datasets/MATH-TTT",
+    "dataset_config": null,
+    "prompt_column": "prompt",
+    "answer_column": "answer",
+    "split": "test"
+  },
+  "aime_ttt": {
+    "dataset_name": "../datasets/AIME-TTT",
+    "dataset_config": null,
+    "prompt_column": "prompt",
+    "answer_column": "answer",
+    "split": "test"
+  },
+  "amc_ttt": {
+    "dataset_name": "../datasets/AMC-TTT",
+    "dataset_config": null,
+    "prompt_column": "prompt",
+    "answer_column": "answer",
+    "split": "test"
+  },
+  "gpqa_ttt": {
+    "dataset_name": "../datasets/GPQA-TTT",
+    "dataset_config": null,
+    "prompt_column": "prompt",
+    "answer_column": "answer",
+    "split": "test"
+  },
+  "math_l1_ttt": {
+    "dataset_name": "../datasets/MATH-L1-TTT",
+    "dataset_config": null,
+    "prompt_column": "prompt",
+    "answer_column": "answer",
+    "split": "test"
+  },
+  "math_l2_ttt": {
+    "dataset_name": "../datasets/MATH-L2-TTT",
+    "dataset_config": null,
+    "prompt_column": "prompt",
+    "answer_column": "answer",
+    "split": "test"
+  },
+  "math_l3_ttt": {
+    "dataset_name": "../datasets/MATH-L3-TTT",
+    "dataset_config": null,
+    "prompt_column": "prompt",
+    "answer_column": "answer",
+    "split": "test"
+  },
+  "math_l4_ttt": {
+    "dataset_name": "../datasets/MATH-L4-TTT",
+    "dataset_config": null,
+    "prompt_column": "prompt",
+    "answer_column": "answer",
+    "split": "test"
+  },
+  "math_l5_ttt": {
+    "dataset_name": "../datasets/MATH-L5-TTT",
+    "dataset_config": null,
+    "prompt_column": "prompt",
+    "answer_column": "answer",
+    "split": "test"
+  }
+}

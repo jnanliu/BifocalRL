@@ -1,0 +1,134 @@
+{
+  "global": {
+    "default_dpi": 220
+  },
+  "plots": [
+    {
+      "title": "Qwen2.5-3B: Intuitor vs MV",
+      "output": "output/fig_qwen_example.png",
+      "figure": {
+        "size": [13, 6]
+      },
+      "x": {
+        "values": [1, 2, 3, 4, 5],
+        "labels": ["ckpt-1", "ckpt-2", "ckpt-3", "ckpt-4", "ckpt-5"],
+        "label": "Checkpoint",
+        "tick_rotation": 40
+      },
+      "y": {
+        "label": "Score",
+        "limits": [0.55, 0.85]
+      },
+      "series": [
+        {
+          "label": "co-intuitor",
+          "y": [0.68, 0.70, 0.72, 0.73, 0.74],
+          "style": {
+            "color": "#1a5fb4",
+            "linestyle": "-",
+            "marker": "o",
+            "linewidth": 2.2,
+            "markersize": 5
+          }
+        },
+        {
+          "label": "co-mv",
+          "y": [0.66, 0.67, 0.69, 0.70, 0.71],
+          "style": {
+            "color": "#62a0ea",
+            "linestyle": "--",
+            "marker": "s",
+            "linewidth": 2.2,
+            "markersize": 5
+          }
+        },
+        {
+          "label": "single-intuitor",
+          "y": [0.65, 0.66, 0.67, 0.67, 0.68],
+          "style": {
+            "color": "#c01c28",
+            "linestyle": "-",
+            "marker": "^",
+            "linewidth": 2.0,
+            "markersize": 5
+          }
+        }
+      ],
+      "baselines": [
+        {
+          "label": "Qwen2.5-3B baseline",
+          "value": 0.6823,
+          "style": {
+            "color": "#8b5cf6",
+            "linestyle": ":",
+            "linewidth": 1.6
+          }
+        }
+      ]
+    },
+    {
+      "title": "Llama-3.2-3B: CruxEval",
+      "output": "output/fig_llama_cruxeval_example.png",
+      "figure": {
+        "size": [12, 5.5]
+      },
+      "x": {
+        "labels": ["init", "ckpt-1", "ckpt-2", "ckpt-3", "ckpt-4"],
+        "label": "Checkpoint",
+        "tick_rotation": 0
+      },
+      "y": {
+        "label": "Accuracy",
+        "limits": [0.20, 0.46]
+      },
+      "series": [
+        {
+          "label": "co-intuitor",
+          "y": [0.255, 0.31, 0.34, 0.37, 0.405],
+          "style": {
+            "color": "#1E40AF",
+            "linestyle": "-",
+            "marker": "o",
+            "linewidth": 2.2
+          },
+          "annotate": {
+            "enabled": true,
+            "fmt": "{:.3f}",
+            "fontsize": 7
+          }
+        },
+        {
+          "label": "single-intuitor",
+          "y": [0.255, 0.28, 0.30, 0.33, 0.35],
+          "style": {
+            "color": "#EF4444",
+            "linestyle": "--",
+            "marker": "s",
+            "linewidth": 2.0
+          }
+        }
+      ],
+      "baselines": [
+        {
+          "label": "Llama base",
+          "value": 0.255,
+          "style": {
+            "color": "#555555",
+            "linestyle": ":"
+          }
+        }
+      ],
+      "grid": {
+        "enabled": true,
+        "alpha": 0.25,
+        "linestyle": "--"
+      },
+      "legend": {
+        "enabled": true,
+        "loc": "best",
+        "fontsize": 9,
+        "framealpha": 0.9
+      }
+    }
+  ]
+}

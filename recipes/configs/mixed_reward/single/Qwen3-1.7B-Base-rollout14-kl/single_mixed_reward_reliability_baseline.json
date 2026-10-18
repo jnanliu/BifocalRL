@@ -1,0 +1,135 @@
+{
+  "output_group": "mixed_reward",
+  "name": "single-mixed-reward-reliability-baseline-gspo",
+  "models": {
+    "policy": "../models/Qwen3-1.7B-Base",
+    "reward": null,
+    "model_tag": "qwen3_17b_base_rollout14_kl"
+  },
+  "dataset": {
+    "key": "math_lighteval",
+    "max_samples": null,
+    "system_prompt": null,
+    "prompt_mode": "suffix",
+    "instruction_suffix": " Let's think step by step and output the final answer within \\boxed{}.",
+    "enable_thinking": "none",
+    "problems_per_step": 128,
+    "shuffle": true
+  },
+  "generation": {
+    "num_generations": 14,
+    "temperature": 0.9,
+    "top_p": 1.0,
+    "repetition_penalty": 1,
+    "max_completion_length": 3072,
+    "max_prompt_length": 512
+  },
+  "scoring": {
+    "scoring_batch_size": 4,
+    "logps_batch_size": 16
+  },
+  "reward": {
+    "mode": "mixed_reward",
+    "beta": 0.001,
+    "mixed_reward_alpha": 0.5,
+    "mixed_reward_alpha_mode": "reliability_sc_corr",
+    "mixed_reward_corr_weight_mode": "none",
+    "mixed_reward_reliability_use_sample_weight": false,
+    "mixed_reward_reliability_use_advantage_weight": false,
+    "mixed_reward_reliability_sample_weight_sigma": 0.1,
+    "mixed_reward_reliability_advantage_weight_sigma": 0.1
+  },
+  "training": {
+    "num_gpus": 2,
+    "max_steps": 58,
+    "start_step": 1,
+    "per_device_batch_size": 2,
+    "gradient_accumulation_steps": 448,
+    "learning_rate": "3e-6",
+    "warmup_ratio": 0.1,
+    "lr_scheduler": "cosine",
+    "weight_decay": 0,
+    "torch_dtype": "bfloat16",
+    "seed": 7,
+    "bf16": true,
+    "gradient_checkpointing": true,
+    "num_iterations": 1,
+    "epsilon": 0.2,
+    "objective_mode": "gspo",
+    "is_length_norm": "mean",
+    "self_update_epsilon_low": 0.0003,
+    "self_update_epsilon_high": 0.0004,
+    "max_grad_norm": 1,
+    "accelerator_config": "zero3"
+  },
+  "vllm": {
+    "use_offline": true,
+    "gpu_memory_utilization": 0.95,
+    "dtype": "bfloat16",
+    "max_model_len": 4096,
+    "max_num_seqs": 256,
+    "max_num_batched_tokens": 8192,
+    "chunked_prefill": true,
+    "start_timeout": 900,
+    "auto_start": false,
+    "auto_stop": true,
+    "port": 7802,
+    "gpu": 0,
+    "tensor_parallel_size": 1
+  },
+  "output": {
+    "keep_all_checkpoints": false,
+    "checkpoint_dir": "outputs/${output_group}/train/${models.model_tag}/${name}/latest_checkpoint",
+    "lighteval_prefix": "outputs/${output_group}/train/${models.model_tag}/${name}/lighteval",
+    "zeroeval_root": "outputs/${output_group}/train/${models.model_tag}/${name}/zeroeval",
+    "ttrl_dir": "outputs/${output_group}/eval/${models.model_tag}/${name}"
+  },
+  "eval": {
+    "max_original_tokens": 4096,
+    "local_datasets_root": "../datasets",
+    "lighteval": {
+      "enabled": false,
+      "tasks": "math_500,gsm8k",
+      "prompt_mode": "system",
+      "system_prompt": null,
+      "custom_tasks": "eval.lighteval.custom_tasks.offline_patch",
+      "data_parallel_size": 1
+    },
+    "zeroeval": {
+      "enabled": false,
+      "tasks": "cruxeval",
+      "repo_dir": "third_party/ZeroEval",
+      "tp_size": 1,
+      "batch_size": 400,
+      "max_tokens": 4096,
+      "gpu_memory_utilization": 0.95,
+      "max_samples": 800
+    },
+    "hacrl": {
+      "enabled": false,
+      "tasks": "math_500,gsm8k",
+      "scorer": "hacrl_math_boxed",
+      "num_generations": 1,
+      "max_samples": null,
+      "use_offline": true,
+      "gpu_memory_utilization": 0.9,
+      "tensor_parallel_size": 1,
+      "dtype": "bfloat16",
+      "temperature": 0,
+      "top_p": 1
+    },
+    "ttrl": {
+      "enabled": true,
+      "tasks": "math_500,gsm8k",
+      "scorer": "ttrl_math",
+      "num_generations": 1,
+      "max_samples": null,
+      "prompt_mode": "suffix",
+      "temperature": 0,
+      "top_p": 1,
+      "gpu_memory_utilization": 0.9,
+      "tensor_parallel_size": 1,
+      "dtype": "bfloat16"
+    }
+  }
+}

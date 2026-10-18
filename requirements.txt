@@ -1,0 +1,57 @@
+# Co-learning requirements (trl-free)
+#
+# Install (use this file in the same venv you run training / ablation / vLLM):
+#   pip install -U pip
+#   pip install -r co-learning/requirements.txt
+#
+# Compatibility notes (Mar 2026):
+# - vLLM requires transformers>=4.56.0,<5.0.0; keep transformers on latest 4.x
+#   (e.g. 4.57.x) in this venv.
+# - PyTorch: match vLLM’s install guide for your CUDA (install torch first if needed).
+# - Python >=3.10 (match vLLM).
+# - lighteval>=0.13.0 requires datasets>=4.0.0 (use datasets 4.x).
+# - lighteval pins latex2sympy2_extended==1.0.6; math-verify>=0.6 pulls a newer
+#   latex2sympy2_extended — use math-verify>=0.5.2,<0.6.0 to stay aligned.
+# - accelerate 1.x works with transformers 4.x.
+#
+# Phi-4 / Phi-3 with trust_remote_code (e.g. microsoft/Phi-4-mini-instruct):
+#   Hub ``modeling_phi3.py`` still does ``from transformers.utils import LossKwargs``.
+#   In transformers 4.55+ that name was removed from ``transformers.utils`` (the
+#   type is now ``TransformersKwargs`` in ``transformers.utils.generic``), so a
+#   bare REPL ``from transformers.utils import LossKwargs`` fails on 4.57.x even
+#   when your env is correct.  ``utils/model_utils.py`` applies a small alias at
+#   import time so ``get_model`` / scoring pipelines can load Phi checkpoints.
+#   If dynamic import still fails, clear stale compiled modules:
+#     rm -rf ~/.cache/huggingface/modules/transformers_modules/Phi_*
+#
+# Model support (intentional scope): Mistral (e.g. 7B/Instruct, Nemo, Small 3.x),
+# Gemma (1/2/3), and Phi-3/Phi-4 style models with remote code when transformers
+# is kept at 4.56+ as below. No transformers 5.x.
+#
+# Core
+torch>=2.4.0
+transformers>=4.56.0,<5.0.0
+datasets>=4.0.0
+accelerate>=1.0.0
+
+# Distributed training
+deepspeed>=0.14.0
+
+# Inference / generation (pins transformers<5 transitively)
+vllm>=0.17.0
+
+# Evaluation
+lighteval>=0.13.0
+math-verify>=0.5.2,<0.6.0
+latex2sympy2-extended==1.0.6
+
+# Utilities
+tqdm
+matplotlib
+psutil
+requests
+numpy
+sympy
+pylatexenc
+sentencepiece
+packaging

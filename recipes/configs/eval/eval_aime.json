@@ -1,0 +1,68 @@
+{
+  "name": "eval-aime",
+  "_doc": "Standalone evaluation on math benchmarks using TTRL-style scoring. math_500/gsm8k use pass@1; aime25/aime24/amc23 use avg@32. Controlled via dataset_overrides.",
+  "model": {
+    "path": "/path/to/model",
+    "tag": "a"
+  },
+  "dataset": {
+    "system_prompt": null,
+    "prompt_mode": null,
+    "instruction_suffix": null,
+    "enable_thinking": "false",
+    "local_datasets_root": "../datasets"
+  },
+  "generation": {
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "max_new_tokens": 4096,
+    "seed": 7
+  },
+  "hacrl": {
+    "enabled": false
+  },
+  "lighteval": {
+    "enabled": false
+  },
+  "zeroeval": {
+    "enabled": false
+  },
+  "ttrl": {
+    "enabled": true,
+    "tasks": "math_500,gsm8k,aime25,aime24,amc23",
+    "scorer": "ttrl_math",
+    "_metric": "Default pass@1 for all datasets. dataset_overrides specifies avg@32 for AIME/AMC.",
+    "num_generations": 1,
+    "max_samples": null,
+    "prompt_mode": "suffix",
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "gpu_memory_utilization": 0.95,
+    "tensor_parallel_size": 1,
+    "dtype": "bfloat16",
+    "dataset_overrides": {
+      "aime25": {
+        "num_generations": 32,
+        "temperature": 0.6,
+        "top_p": 0.95
+      },
+      "aime24": {
+        "num_generations": 32,
+        "temperature": 0.6,
+        "top_p": 0.95
+      },
+      "amc23": {
+        "num_generations": 32,
+        "temperature": 0.6,
+        "top_p": 0.95
+      }
+    }
+  },
+  "output": {
+    "keep_all_checkpoints": true,
+    "hacrl_dir": "outputs/hacrl_eval/aime",
+    "lighteval_dir": "outputs/lighteval/aime/{checkpoint}",
+    "zeroeval_root": "outputs/zeroeval/aime",
+    "ttrl_dir": "outputs/ttrl_eval/aime"
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "profile": {
+    "name": "extended-eval",
+    "output_suffix": "extended-eval",
+    "start_step": 0,
+    "end_step": 15,
+    "strict": true
+  },
+  "eval": {
+    "max_new_tokens": 4096,
+    "local_datasets_root": "../datasets",
+    "lighteval": {
+      "enabled": true,
+      "tasks": "custom|lcb:codegeneration_release_v6_single|0|0",
+      "prompt_mode": "bare",
+      "system_prompt": null,
+      "custom_tasks": "eval.lighteval.custom_tasks.offline_lcb_single",
+      "data_parallel_size": 1,
+      "max_model_len": 8192,
+      "gpu_memory_utilization": 0.9,
+      "dtype": "bfloat16",
+      "temperature": 0.0,
+      "top_p": 1.0
+    },
+    "zeroeval": {
+      "enabled": false,
+      "tasks": "cruxeval",
+      "repo_dir": "third_party/ZeroEval",
+      "tp_size": 1,
+      "batch_size": 400,
+      "max_tokens": 4096,
+      "gpu_memory_utilization": 0.95,
+      "max_samples": 800
+    },
+    "hacrl": {
+      "enabled": true,
+      "tasks": "cruxeval",
+      "scorer": "default",
+      "num_generations": 1,
+      "max_samples": 800,
+      "max_new_tokens": 4096,
+      "max_model_len": 8192,
+      "use_offline": true,
+      "gpu_memory_utilization": 0.9,
+      "tensor_parallel_size": 1,
+      "dtype": "bfloat16",
+      "temperature": 0.0,
+      "top_p": 1.0
+    },
+    "ttrl": {
+      "enabled": true,
+      "tasks": "aime24,aime25,amc23",
+      "scorer": "ttrl_math",
+      "num_generations": 1,
+      "max_samples": null,
+      "prompt_mode": "suffix",
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "gpu_memory_utilization": 0.9,
+      "tensor_parallel_size": 1,
+      "dtype": "bfloat16",
+      "max_model_len": 8192
+    }
+  }
+}

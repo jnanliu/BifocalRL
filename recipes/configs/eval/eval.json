@@ -1,0 +1,74 @@
+{
+  "name": "eval-llama-3.2-3b-instruct",
+  "model": {
+    "path": "../models/Llama-3.2-3B-Instruct",
+    "tag": "a"
+  },
+  "dataset": {
+    "system_prompt": null,
+    "prompt_mode": null,
+    "instruction_suffix": null,
+    "enable_thinking": "false",
+    "local_datasets_root": "../datasets"
+  },
+  "generation": {
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "max_new_tokens": 4096,
+    "seed": 7
+  },
+  "hacrl": {
+    "enabled": true,
+    "tasks": "gsm8k",
+    "scorer": "hacrl_gsm8k",
+    "num_generations": 1,
+    "max_samples": null,
+    "use_offline": true,
+    "gpu_memory_utilization": 0.95,
+    "tensor_parallel_size": 1,
+    "dtype": "bfloat16",
+    "max_model_len": 4096,
+    "cuda_device": null,
+    "vllm_batch_size": 16
+  },
+  "lighteval": {
+    "enabled": false,
+    "tasks": "math_500,gsm8k",
+    "prompt_mode": "system",
+    "system_prompt": null,
+    "custom_tasks": "eval.lighteval.custom_tasks.offline_patch",
+    "data_parallel_size": 1,
+    "gpu_memory_utilization": 0.9,
+    "max_model_length": 4096,
+    "dtype": "bfloat16"
+  },
+  "zeroeval": {
+    "enabled": false,
+    "repo_dir": "third_party/ZeroEval",
+    "tp_size": 1,
+    "batch_size": 4,
+    "max_tokens": 2048,
+    "gpu_memory_utilization": 0.95,
+    "max_samples": 800
+  },
+  "ttrl": {
+    "enabled": false,
+    "tasks": "math_ttt,aime_ttt",
+    "scorer": "ttrl_math",
+    "num_generations": 1,
+    "max_samples": null,
+    "prompt_mode": "bare",
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "gpu_memory_utilization": 0.9,
+    "tensor_parallel_size": 1,
+    "dtype": "bfloat16"
+  },
+  "output": {
+    "keep_all_checkpoints": true,
+    "hacrl_dir": "outputs/hacrl_eval/eval",
+    "lighteval_dir": "outputs/lighteval/eval/{checkpoint}",
+    "zeroeval_root": "outputs/zeroeval/eval",
+    "ttrl_dir": "outputs/ttrl_eval/eval/{checkpoint}"
+  }
+}
