@@ -1,0 +1,6 @@
+{
+  "method": "mixed",
+  "mixed": {
+    "alpha_mode": "reliability_sc_corr"
+  }
+}

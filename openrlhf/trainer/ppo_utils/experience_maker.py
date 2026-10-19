@@ -202,6 +202,10 @@ class RemoteExperienceMaker:
         for i, (samples, action_log_probs, base_action_log_probs, value) in enumerate(
             zip(samples_list, action_log_probs_list, base_action_log_probs_list, value_list)
         ):
+            if isinstance(action_log_probs, dict):
+                samples.info["bifocal_sc"] = action_log_probs["bifocal_sc"]
+                samples.info["bifocal_entropy"] = action_log_probs["bifocal_entropy"]
+                action_log_probs = action_log_probs["log_probs"]
             if (self.initial_model_group is not None) and (not args.algo.kl.use_loss):
                 kl = compute_approx_kl(
                     action_log_probs,
@@ -238,6 +242,10 @@ class RemoteExperienceMaker:
     def compute_advantages_and_returns(self, experiences: List[Experience]) -> List[Experience]:
         """Compute shaped rewards, advantages, and returns for a batch of experiences."""
         args = self.strategy.args
+        if getattr(getattr(args, "bifocal", None), "settings", None):
+            from openrlhf.algorithms.bifocalrl.runtime import assign_advantages
+
+            return assign_advantages(self, experiences)
 
         # Use at least FP32 for reward penalties and group statistics.
         for experience in experiences:

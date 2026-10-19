@@ -1,3 +1,5 @@
+[Local BifocalRL migration: TTRL, Intuitor, fusion, ETTRL, CoVo and PRISM](examples/bifocalrl/README.md)
+
 <div align="center">
     <img alt="OpenRLHF logo" src="./docs/logo.png" style="height: 140px;" />
 </div>

@@ -1,0 +1,8 @@
+{
+  "method": "mixed",
+  "mixed": {
+    "alpha": 0.5,
+    "alpha_mode": "fixed",
+    "final_normalize": true
+  }
+}

@@ -622,8 +622,8 @@ class PolicyModelActor(BaseModelActor):
         attention_mask: Optional[torch.Tensor] = None,
         packed_seq_lens=None,
         mm_train_inputs_list=None,
-    ) -> torch.Tensor:
-        """Generates actor values."""
+    ) -> Union[torch.Tensor, dict[str, torch.Tensor]]:
+        """Return action logprobs and optional detached BifocalRL response means."""
         device = torch.cuda.current_device()
 
         # VLM: merge pre-processed multimodal inputs from all samples in batch
@@ -632,15 +632,27 @@ class PolicyModelActor(BaseModelActor):
             mm_inputs = merge_mm_train_inputs(mm_train_inputs_list, device)
 
         self.actor.eval()
+        cfg = getattr(getattr(self.strategy.args, "bifocal", None), "settings", None)
+        collect_stats = bool(cfg and cfg["method"] not in ("ttrl", "covo"))
+        self.actor.bifocal_collect_stats = collect_stats
         with torch.no_grad():
             action_log_probs = self.actor(
                 sequences.to(device),
                 action_mask.to(device),
                 attention_mask.to(device),
                 ring_attn_group=self.strategy.ring_attn_group,
+                return_output=collect_stats,
                 **mm_inputs,
             )
         self.actor.train()  # reset model state
+        if collect_stats:
+            log_probs, output = action_log_probs
+            mask = action_mask.to(device).float()
+            return {
+                "log_probs": log_probs.cpu(),
+                "bifocal_sc": ((output["bifocal_sc"] * mask).sum(-1) / mask.sum(-1).clamp_min(1)).cpu(),
+                "bifocal_entropy": ((output["bifocal_entropy"] * mask).sum(-1) / mask.sum(-1).clamp_min(1)).cpu(),
+            }
         return action_log_probs.to("cpu")
 
     def broadcast_to_vllm(self):

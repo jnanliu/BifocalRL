@@ -191,6 +191,13 @@ class RolloutRayActor:
         images=None,
     ):
         """Generate N samples for a single prompt."""
+        metadata = getattr(sampling_params, "extra_args", None) or {}
+        if metadata.get("bifocal"):
+            from openrlhf.algorithms.bifocalrl.rollout import generate_group
+
+            return await generate_group(
+                prompt, label, sampling_params, max_length, hf_tokenizer, self, num_samples, images=images
+            )
         tasks = [
             self.executor.execute(
                 prompt=prompt,

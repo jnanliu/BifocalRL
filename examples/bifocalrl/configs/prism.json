@@ -1,0 +1,6 @@
+{
+  "method": "prism",
+  "prism_gamma": 1.0,
+  "prism_gamma_schedule": "constant",
+  "prm_model": "GenPRM/GenPRM-7B"
+}

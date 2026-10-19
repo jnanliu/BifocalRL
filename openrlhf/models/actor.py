@@ -265,6 +265,17 @@ class Actor(nn.Module):
         output = self.model(sequences, attention_mask=foward_attention_mask, position_ids=position_ids, **mm_inputs)
         # https://github.com/OpenRLHF/OpenRLHF/pull/634
         output["logits"] = output["logits"].to(torch.float32)
+        if getattr(self, "bifocal_collect_stats", False) and not torch.is_grad_enabled():
+            from openrlhf.algorithms.bifocalrl.stats import vocabulary_statistics
+
+            shape = output["logits"].shape
+            sc, entropy = vocabulary_statistics(output["logits"].reshape(-1, shape[-1]), chunk_size=256)
+            sc, entropy = sc.reshape(shape[:-1]), entropy.reshape(shape[:-1])
+            if self.packing_samples:
+                sc = gather_and_pad_tensor(sc, ring_attn_group, ring_attn_pad_len, indices, batch, seqlen)
+                entropy = gather_and_pad_tensor(entropy, ring_attn_group, ring_attn_pad_len, indices, batch, seqlen)
+            output["bifocal_sc"] = sc[:, :-1][:, -action_mask.shape[1] :]
+            output["bifocal_entropy"] = entropy[:, :-1][:, -action_mask.shape[1] :]
         # Scale once here so the entropy below and the log probs describe the same
         # temperature-scaled policy that the rollout sampled from.
         if self.temperature != 1.0:

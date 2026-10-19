@@ -63,6 +63,10 @@ def train(args):
                 f"and {args.vllm.num_engines * args.vllm.tensor_parallel_size}"
             )
 
+        bifocal = getattr(getattr(args, "bifocal", None), "settings", None)
+        processed_logprobs = args.algo.advantage.is_correction_level != "off" or bool(
+            bifocal and bifocal["method"] == "ettrl" and bifocal["tree_enabled"]
+        )
         vllm_engines = create_vllm_engines(
             args.vllm.num_engines,
             args.vllm.tensor_parallel_size,
@@ -75,7 +79,7 @@ def train(args):
             pg if args.train.colocate_all and not args.train.async_enable else None,
             args.vllm.gpu_memory_utilization,
             args.vllm.enable_sleep,
-            "processed_logprobs" if args.algo.advantage.is_correction_level != "off" else None,
+            "processed_logprobs" if processed_logprobs else None,
             agent_func_path=args.train.agent_func_path,
             remote_rm_url=args.reward.remote_url,
             max_images_per_prompt=getattr(args.data, "max_images_per_prompt", 0),
@@ -196,6 +200,9 @@ def train(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    from openrlhf.algorithms.bifocalrl.runtime import add_arguments, configure
+
+    add_arguments(parser)
     # Ray and vLLM
     parser.add_argument("--ref.num_nodes", type=int, default=1, help="number of nodes for reference")
     parser.add_argument("--ref.num_gpus_per_node", type=int, default=8, help="number of gpus per node for reference")
@@ -628,6 +635,7 @@ if __name__ == "__main__":
     from openrlhf.utils.config import hierarchize
 
     args = hierarchize(args)
+    configure(args)
 
     # Validate arguments
     if args.actor.eps_clip_low_high is None:

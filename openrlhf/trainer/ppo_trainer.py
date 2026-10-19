@@ -1,6 +1,7 @@
 import os
 import time
 from abc import ABC
+from copy import copy, deepcopy
 from datetime import timedelta
 from typing import Dict, Tuple
 
@@ -57,7 +58,13 @@ def prepare_datasets(strategy, tokenizer):
             dataset_split=args.eval.split,
         )
         eval_data = eval_data.select(range(min(args.data.max_samples, len(eval_data))))
-        eval_dataset = PromptDataset(eval_data, tokenizer, strategy, input_template=args.data.input_template)
+        eval_strategy = strategy
+        cfg = getattr(getattr(args, "bifocal", None), "settings", None)
+        if cfg:
+            eval_strategy = copy(strategy)
+            eval_strategy.args = deepcopy(args)
+            eval_strategy.args.data.label_key = cfg["eval_label_key"]
+        eval_dataset = PromptDataset(eval_data, tokenizer, eval_strategy, input_template=args.data.input_template)
         eval_dataloader = strategy.setup_dataloader(
             eval_dataset,
             1,
@@ -213,6 +220,12 @@ class BasePPOTrainer(ABC):
     def train_step(self, rollout_samples, global_step: int) -> Tuple[Dict, int]:
         # Turn raw rollouts into PPO-ready trajectories with rewards.
         t0 = time.time()
+        if getattr(getattr(self.args, "bifocal", None), "settings", None):
+            self.experience_maker.bifocal_step = global_step
+            batch = self.args.rollout.batch_size
+            self.experience_maker.bifocal_total_steps = max(
+                2, (len(self.prompts_dataloader) + batch - 1) // batch * self.args.train.num_episodes
+            )
         experiences = self.experience_maker.make_experience_batch(rollout_samples)
         make_experience_time = time.time() - t0
 

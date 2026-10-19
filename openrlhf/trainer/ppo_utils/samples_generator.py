@@ -60,6 +60,8 @@ class SamplesGenerator:
     @torch.no_grad()
     def generate_eval_samples(self, **generate_kwargs) -> List[Experience]:
         """Generate evaluation samples for the entire eval dataloader."""
+        if getattr(getattr(self.args, "bifocal", None), "settings", None):
+            generate_kwargs["bifocal_evaluation"] = True
         if getattr(self, "_eval_dataloader_iter", None) is None:
             self._eval_dataloader_iter = iter(self.eval_dataloader)
 
@@ -205,6 +207,12 @@ class SamplesGenerator:
             skip_special_tokens=generate_kwargs.get("skip_special_tokens", False),
             logprobs=1 if self.args.algo.advantage.is_correction_level != "off" else None,
         )
+        cfg = getattr(getattr(self.args, "bifocal", None), "settings", None)
+        if cfg:
+            sampling_params.extra_args = {
+                "bifocal": cfg,
+                "bifocal_evaluation": generate_kwargs.get("bifocal_evaluation", False),
+            }
         truncate_length = generate_kwargs.get("max_len", 2048)
         n_samples = generate_kwargs.get("n_samples_per_prompt", self.args.rollout.n_samples_per_prompt)
 
