@@ -1,0 +1,8 @@
+{
+  "method": "circa",
+  "circa_cluster_weight": 0.5,
+  "circa_certainty_weight": 0.5,
+  "circa_format_weight": 0.1,
+  "kl_cov_fraction": 0.02,
+  "kl_cov_coef": 0.05
+}

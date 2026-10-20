@@ -6,10 +6,23 @@ import importlib.util
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from openrlhf.algorithms.bifocalrl.runtime import configure
 
 
-def test_native_cli_installs_recipe_before_critic_and_reward_selection():
+@pytest.mark.parametrize(
+    "recipe,method",
+    [
+        ("ettrl", None),
+        ("bifocalrl", None),
+        ("bifocalrl", "BifocalRL"),
+        ("reliability_sc_corr", None),
+        ("circa", None),
+        ("circa", "CIRCA"),
+    ],
+)
+def test_native_cli_installs_recipe_before_critic_and_reward_selection(recipe, method):
     root = Path(__file__).resolve().parents[2]
     spec = importlib.util.spec_from_file_location("bifocal_cli_config", root / "openrlhf/utils/config.py")
     module = importlib.util.module_from_spec(spec)
@@ -34,18 +47,24 @@ def test_native_cli_installs_recipe_before_critic_and_reward_selection():
     parsed = namespace["parser"].parse_args(
         [
             "--bifocal.config",
-            str(root / "examples/bifocalrl/configs/ettrl.json"),
+            str(root / f"examples/bifocalrl/configs/{recipe}.json"),
             "--vllm.num_engines",
             "1",
             "--rollout.n_samples_per_prompt",
             "8",
             "--algo.kl.init_coef",
-            "0",
+            "0.005" if recipe == "circa" else "0",
         ]
+        + (["--bifocal.method", method] if method else [])
+        + (["--algo.kl.use_loss"] if recipe == "circa" else [])
     )
     args = module.hierarchize(parsed)
     configure(args)
-    assert args.bifocal.settings["method"] == "ettrl"
+    assert args.bifocal.settings["method"] == recipe
     assert args.algo.advantage.estimator == "group_norm"
     assert args.reward.remote_url == "agent"
     assert args.critic.model_name_or_path is None
+    if recipe == "bifocalrl":
+        assert args.bifocal.settings["mixed"]["sc_between_gamma"] == 0.5
+    if recipe == "circa":
+        assert args.algo.kl.use_loss and args.algo.kl.init_coef == 0.005

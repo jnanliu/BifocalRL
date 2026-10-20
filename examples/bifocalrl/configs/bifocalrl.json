@@ -1,0 +1,12 @@
+{
+  "method": "bifocalrl",
+  "mixed": {
+    "alpha": 0.5,
+    "alpha_mode": "bifocalrl",
+    "gd2po_filter_mode": "snr",
+    "gd2po_snr_threshold": 0.5,
+    "gd2po_query_reweight": true,
+    "sc_between_gamma": 0.5,
+    "final_normalize": true
+  }
+}

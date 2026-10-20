@@ -61,14 +61,10 @@ def test_prism_min_harmonic_and_separate_normalization():
 def test_covo_consistency_volatility_and_cluster_denominator():
     distances = [[1, 3], [3, 1], [1, 2], [1, 4]]
     assert covo_features(distances, 0) == (0.75, 0.25)
-    assert covo_features(distances, 0, released=True) == (0.75, 0.5)
     assert covo_features([[1, 1]], 0) == (1.0, 0.0)
-    assert covo_features([[1, 1]], 0, released=True) == (0.0, 0.0)
     rewards = covo_rewards([(1, 0), (0.5, 0), (0, 0)], [0, 0, 1], [0, 0, 0])
     assert rewards == [0.75, 0.75, 0.0]
     assert covo_curiosity([[-2.0, -2.0]]) == pytest.approx(2)
-    released = covo_rewards([(0.6, 0), (0.2, 0)], [0, 1], [3, 1], released=True)
-    assert released == [1.4, 0.0]
 
 
 def test_prm_parsing_rejects_missing_completion():

@@ -315,6 +315,32 @@ class ActorPPOTrainer(ABC):
             experience.info["vllm_kl"] = vllm_kl.detach()
             experience.info["is_filter_ratio"] = is_filter_ratio.detach()
 
+        cfg = getattr(getattr(self.args, "bifocal", None), "settings", None)
+        if cfg and cfg["method"] == "circa":
+            from openrlhf.algorithms.bifocalrl.methods import kl_cov_policy_loss
+
+            token_loss, selected = kl_cov_policy_loss(
+                action_log_probs,
+                old_action_log_probs,
+                advantages,
+                action_mask,
+                clip_low=self.args.actor.eps_clip_low_high[0],
+                clip_high=self.args.actor.eps_clip_low_high[1],
+                fraction=cfg["kl_cov_fraction"],
+                coefficient=cfg["kl_cov_coef"],
+                group=self.strategy.ds_device_mesh["dp"].get_group(),
+            )
+            actor_loss = aggregate_loss(token_loss, action_mask, **loss_batch_info)
+            ratio = (action_log_probs.detach() - old_action_log_probs).clamp(-20, 20).exp()
+            clipped = ratio.clamp(1 - self.args.actor.eps_clip_low_high[0], 1 + self.args.actor.eps_clip_low_high[1])
+            experience.info["ppo_clip_ratio"] = masked_mean(
+                ((clipped * advantages < ratio * advantages) & ~selected).float(), action_mask, dim=None
+            ).detach()
+            experience.info["kl_cov_fraction"] = masked_mean(selected.float(), action_mask, dim=None).detach()
+            experience.info["kl_cov_log_ratio"] = masked_mean(
+                (action_log_probs - old_action_log_probs).abs().detach() * selected, action_mask, dim=None
+            )
+
         if self.args.algo.kl.use_loss:
             if self.args.algo.kl.init_coef > 0:
                 kl = compute_approx_kl(

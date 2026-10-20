@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .methods import covo_curiosity, covo_features, covo_rewards, prism_reward
-from .voting import extract_answers, is_math_equivalent, weighted_majority_voting
+from .voting import cluster_voting_rewards, extract_answers, is_math_equivalent, weighted_majority_voting
 
 
 async def score_continuation(engine, prefix, continuation):
@@ -52,7 +52,6 @@ async def score_covo(cfg, responses, tokenizer, engine):
         answer_ids.append(own)
     candidates = [tokenizer.encode(answer, add_special_tokens=False) for answer in unique]
     semaphore = asyncio.Semaphore(cfg["score_concurrency"])
-    released = cfg["covo_variant"] == "released"
 
     async def score(prefix, continuation):
         async with semaphore:
@@ -72,8 +71,8 @@ async def score_covo(cfg, responses, tokenizer, engine):
             distances.append([-sum(lp) / len(lp) for lp in scored[:-1]])
             steps.append(scored[-1])
             prefix.extend(tokens)
-        feature = covo_features(distances, own, released=released) if distances and len(unique) > 1 else (0.0, 0.0)
-        return feature, covo_curiosity(steps, released=released)
+        feature = covo_features(distances, own) if distances and len(unique) > 1 else (0.0, 0.0)
+        return feature, covo_curiosity(steps)
 
     scored = await asyncio.gather(*(trajectory(r, own) for r, own in zip(responses, answer_ids, strict=True)))
     features, curiosities = zip(*scored, strict=True)
@@ -82,7 +81,6 @@ async def score_covo(cfg, responses, tokenizer, engine):
         answer_ids,
         curiosities,
         aggregation=cfg["covo_aggregation"],
-        released=released,
         curiosity_weight=cfg["covo_curiosity_weight"],
     )
     for response, feature, curiosity in zip(responses, features, curiosities, strict=True):
@@ -173,6 +171,17 @@ async def generate_group(prompt, label, sampling_params, max_length, tokenizer, 
     else:
         responses = list(await asyncio.gather(*(generate(prompt_tokens) for _ in range(num_samples))))
     answers = extract_answers([r["response_text"] for r in responses])
+    if not evaluation and cfg["method"] == "bifocalrl":
+        representatives = []
+        for response, answer in zip(responses, answers, strict=True):
+            cluster = next(
+                (i for i, other in enumerate(representatives) if is_math_equivalent(answer, other)), None
+            )
+            # Unparseable answers remain separate: None is not an equivalent answer.
+            if cluster is None:
+                cluster = len(representatives)
+                representatives.append(answer)
+            response["extra_logs"]["bifocal_answer_cluster"] = cluster
     seed = cfg["voting_seed"] + int(hashlib.sha256(prompt.encode()).hexdigest()[:16], 16)
     winner = weighted_majority_voting(answers, [1.0] * len(answers), rng=random.Random(seed)).selected_answer
     votes = [float(is_math_equivalent(answer, winner)) for answer in answers]
@@ -191,6 +200,8 @@ async def generate_group(prompt, label, sampling_params, max_length, tokenizer, 
                 for r in responses
             )
         )
+    elif cfg["method"] == "circa":
+        rewards = cluster_voting_rewards(answers, format_weight=cfg["circa_format_weight"])
     else:
         rewards = votes
     for response, vote, reward in zip(responses, votes, rewards, strict=True):

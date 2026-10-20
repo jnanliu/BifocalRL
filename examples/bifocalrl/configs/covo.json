@@ -1,6 +1,5 @@
 {
   "method": "covo",
-  "covo_variant": "paper",
   "covo_aggregation": "vector",
   "covo_curiosity_weight": 1.0
 }

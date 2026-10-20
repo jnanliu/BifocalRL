@@ -35,11 +35,13 @@ class MixedRewardContext:
 
 @dataclass(frozen=True)
 class MixedRewardResult:
-    """Fused advantages and optional weights applied AFTER batch normalization.
+    """Fused advantages, retained rollouts, and optional post-normalization weights.
 
     sample_weight may be query-level (P, 1) or response-level (P, G).
+    keep_mask excludes filtered rollouts from batch statistics and final updates.
     KL is handled separately by the policy objective.
     """
 
     advantages: torch.Tensor
     sample_weight: torch.Tensor | None = None
+    keep_mask: torch.Tensor | None = None

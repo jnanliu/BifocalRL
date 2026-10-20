@@ -42,6 +42,24 @@ def _simplify_answer(answer: Optional[str]) -> Optional[str]:
         return answer
 
 
+def cluster_voting_rewards(answers, *, format_weight=0.1):
+    """Cluster share among parseable boxed answers, plus the format auxiliary."""
+    representatives, ids, counts = [], [], []
+    for answer in answers:
+        if answer is None:
+            ids.append(None)
+            continue
+        cluster = next((i for i, other in enumerate(representatives) if is_math_equivalent(answer, other)), None)
+        if cluster is None:
+            cluster = len(representatives)
+            representatives.append(answer)
+            counts.append(0)
+        counts[cluster] += 1
+        ids.append(cluster)
+    parseable = sum(counts)
+    return [counts[i] / parseable + format_weight if i is not None else 0.0 for i in ids]
+
+
 def is_math_equivalent(a: Optional[str], b: Optional[str]) -> bool:
     """Math equivalence check using TTRL's grade function.
 

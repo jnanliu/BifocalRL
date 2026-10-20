@@ -4,7 +4,8 @@ set -euo pipefail
 OPENRLHF_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$OPENRLHF_ROOT"
 
-RECIPE_NAME="${1:-mixed}"
+RECIPE_NAME="${1:-bifocalrl}"
+RECIPE_NAME="${RECIPE_NAME,,}"
 if (( $# )); then
   shift
 fi
@@ -33,6 +34,10 @@ export PYTHONPATH="$OPENRLHF_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
 
 EXTRA=()
+if [[ "$RECIPE_NAME" == circa ]]; then
+  KL_COEF="${KL_COEF:-0.005}"
+  EXTRA+=(--algo.kl.use_loss)
+fi
 if [[ "${APPLY_CHAT_TEMPLATE:-1}" == 1 ]]; then
   EXTRA+=(--data.apply_chat_template)
 fi
@@ -83,7 +88,7 @@ exec "${PYTHON:-python}" -m openrlhf.cli.train_ppo_ray \
   --ds.enable_sleep \
   --actor.gradient_checkpointing_enable \
   --actor.adam.lr "${LR:-1e-6}" \
-  --algo.kl.init_coef 0 \
+  --algo.kl.init_coef "${KL_COEF:-0}" \
   --ckpt.output_dir "$OUTPUT_DIR/final" \
   --ckpt.path "$OUTPUT_DIR/checkpoints" \
   --ckpt.save_steps 20 \

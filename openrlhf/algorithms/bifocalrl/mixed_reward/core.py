@@ -12,7 +12,6 @@ from .config import MixedRewardConfig
 from .registry import get_mixed_reward_mode
 from .strategies import (
     _capture_mixed_reward_diagnostic,
-    _compute_legacy_corr_sample_weight,
     _log_mixed_reward_tensor_stats,
 )
 from .types import MixedRewardContext, MixedRewardResult
@@ -27,7 +26,7 @@ def compute_mixed_reward(
     diagnostics: MutableMapping[str, Any] | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> torch.Tensor:
-    """Normalize each reward view, fuse it, normalize the batch, then apply weights.
+    """Normalize views, fuse/filter, normalize retained rollouts, apply optional weights.
 
     This is the config-based API for training code and new experiments.
     Training supplies cached, detached rewards; this API preserves tensor autograd
@@ -81,25 +80,20 @@ def compute_mixed_reward(
     if combined.shape != mv_rewards.shape:
         raise ValueError("Mixed-reward strategy changed the (queries, responses) shape")
     post_normalize_sample_weight = result.sample_weight
-    if mode != "reliability_sc_corr":
-        legacy_sample_weight = _compute_legacy_corr_sample_weight(
-            adv_mv,
-            adv_int,
-            corr_weight_mode=config.corr_weight_mode,
-            corr_weight_threshold=config.corr_weight_threshold,
-            corr_weight_exponent=config.corr_weight_exponent,
-            num_generations_per_model=num_generations_per_model,
-        )
-        if legacy_sample_weight is not None:
-            if post_normalize_sample_weight is not None:
-                raise ValueError("Cannot stack strategy sample weights with legacy correlation weights")
-            post_normalize_sample_weight = legacy_sample_weight
-
+    keep_mask = result.keep_mask
+    if keep_mask is not None and (keep_mask.shape != combined.shape or keep_mask.dtype != torch.bool):
+        raise ValueError("Mixed-reward keep mask must be boolean with shape (queries, responses)")
     _log_mixed_reward_tensor_stats("combined_before_final_normalize", combined)
     _capture_mixed_reward_diagnostic(diagnostics, "combined_before_final_normalize", combined)
 
     if final_normalize:
-        combined = batch_zscore_normalize(combined, eps=eps)
+        if keep_mask is None:
+            combined = batch_zscore_normalize(combined, eps=eps)
+        else:
+            normalized = batch_zscore_normalize(combined[keep_mask], eps=eps)
+            combined = torch.zeros_like(combined).masked_scatter(keep_mask, normalized)
+    elif keep_mask is not None:
+        combined = combined.masked_fill(~keep_mask, 0.0)
     _log_mixed_reward_tensor_stats("combined_after_final_normalize", combined)
     _capture_mixed_reward_diagnostic(diagnostics, "combined_after_final_normalize", combined)
 
@@ -114,67 +108,3 @@ def compute_mixed_reward(
         raise ValueError("mixed_reward produced non-finite final advantages")
 
     return combined
-
-
-def compute_mixed_reward_advantages(
-    mv_rewards: torch.Tensor,
-    intuitor_rewards: torch.Tensor,
-    alpha: float = 0.5,
-    alpha_mode: str = "fixed",
-    alpha_zscore_mu: float = 0.65,
-    alpha_zscore_sigma: float = 0.2,
-    alpha_zscore_lower: float = 0.0,
-    alpha_zscore_upper: float = 1.0,
-    corr_weight_mode: str = "none",
-    corr_weight_threshold: float = 0.1,
-    corr_weight_exponent: float = 0.8,
-    reliability_sc_weight: float = 0.6,
-    reliability_corr_weight: float = 0.4,
-    reliability_use_sample_weight: bool = True,
-    reliability_use_advantage_weight: bool = True,
-    reliability_sample_weight_mu: float = 1.0,
-    reliability_sample_weight_sigma: float = 0.2,
-    reliability_sample_weight_lower: float = 0.5,
-    reliability_sample_weight_upper: float = 1.5,
-    reliability_advantage_weight_mu: float = 0.5,
-    reliability_advantage_weight_sigma: float = 0.2,
-    reliability_advantage_weight_lower: float = 0.2,
-    reliability_advantage_weight_upper: float = 0.8,
-    final_normalize: bool = True,
-    eps: float = 1e-6,
-    num_generations_per_model: int | None = None,
-    diagnostics: MutableMapping[str, Any] | None = None,
-) -> torch.Tensor:
-    """Backward-compatible keyword API; prefer compute_mixed_reward with a config."""
-    config = MixedRewardConfig(
-        alpha=alpha,
-        alpha_mode=alpha_mode,
-        alpha_zscore_mu=alpha_zscore_mu,
-        alpha_zscore_sigma=alpha_zscore_sigma,
-        alpha_zscore_lower=alpha_zscore_lower,
-        alpha_zscore_upper=alpha_zscore_upper,
-        corr_weight_mode=corr_weight_mode,
-        corr_weight_threshold=corr_weight_threshold,
-        corr_weight_exponent=corr_weight_exponent,
-        reliability_sc_weight=reliability_sc_weight,
-        reliability_corr_weight=reliability_corr_weight,
-        reliability_use_sample_weight=reliability_use_sample_weight,
-        reliability_use_advantage_weight=reliability_use_advantage_weight,
-        reliability_sample_weight_mu=reliability_sample_weight_mu,
-        reliability_sample_weight_sigma=reliability_sample_weight_sigma,
-        reliability_sample_weight_lower=reliability_sample_weight_lower,
-        reliability_sample_weight_upper=reliability_sample_weight_upper,
-        reliability_advantage_weight_mu=reliability_advantage_weight_mu,
-        reliability_advantage_weight_sigma=reliability_advantage_weight_sigma,
-        reliability_advantage_weight_lower=reliability_advantage_weight_lower,
-        reliability_advantage_weight_upper=reliability_advantage_weight_upper,
-        final_normalize=final_normalize,
-        eps=eps,
-    )
-    return compute_mixed_reward(
-        mv_rewards,
-        intuitor_rewards,
-        config=config,
-        num_generations_per_model=num_generations_per_model,
-        diagnostics=diagnostics,
-    )

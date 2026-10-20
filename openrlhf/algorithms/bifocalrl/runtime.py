@@ -12,9 +12,9 @@ from .methods import compute_advantages
 from .mixed_reward import MixedRewardConfig
 
 logger = logging.getLogger(__name__)
-METHODS = ("ttrl", "intuitor", "mixed", "legacy_prism", "legacy_ettrl", "ettrl", "covo", "prism")
+METHODS = ("ttrl", "intuitor", "bifocalrl", "reliability_sc_corr", "ettrl", "covo", "prism", "circa")
 DEFAULTS = {
-    "method": "mixed",
+    "method": "bifocalrl",
     "mixed": asdict(MixedRewardConfig()),
     "ear_mode": "clip_res",
     "ear_beta": 2.0,
@@ -31,10 +31,14 @@ DEFAULTS = {
     "prm_function": None,
     "prm_max_tokens": 2048,
     "prm_prompt_file": None,
-    "covo_variant": "paper",
     "covo_aggregation": "vector",
     "covo_curiosity_weight": 1.0,
     "covo_max_steps": 15,
+    "circa_cluster_weight": 0.5,
+    "circa_certainty_weight": 0.5,
+    "circa_format_weight": 0.1,
+    "kl_cov_fraction": 0.02,
+    "kl_cov_coef": 0.05,
     "score_concurrency": 16,
     "voting_seed": 42,
     "eval_label_key": "label",
@@ -44,7 +48,7 @@ DEFAULTS = {
 def add_arguments(parser):
     group = parser.add_argument_group("BifocalRL unsupervised algorithms")
     group.add_argument("--bifocal.config", help="JSON recipe; omitted means native OpenRLHF")
-    group.add_argument("--bifocal.method", choices=METHODS)
+    group.add_argument("--bifocal.method", type=str.lower, choices=METHODS)
     group.add_argument("--bifocal.prm_url", help="Independent GenPRM SGLang endpoint")
     group.add_argument("--bifocal.prm_model", help="PRM tokenizer path matching the endpoint")
 
@@ -62,9 +66,15 @@ def configure(args):
     for key in ("method", "prm_url", "prm_model"):
         if getattr(args.bifocal, key, None) is not None:
             cfg[key] = getattr(args.bifocal, key)
-    MixedRewardConfig(**cfg["mixed"])
+    cfg["method"] = cfg["method"].lower()
     if cfg["method"] not in METHODS:
         raise ValueError(f"Unknown BifocalRL method: {cfg['method']}")
+    if cfg["method"] in ("bifocalrl", "reliability_sc_corr"):
+        mode = cfg["method"]
+        if data.get("mixed", {}).get("alpha_mode", mode) != mode:
+            raise ValueError(f"Method {cfg['method']} requires mixed.alpha_mode={mode!r}")
+        cfg["mixed"]["alpha_mode"] = mode
+    MixedRewardConfig(**cfg["mixed"])
     if args.rollout.n_samples_per_prompt < 2 or args.vllm.num_engines < 1:
         raise ValueError("BifocalRL requires vLLM and at least two responses per prompt")
     if args.train.async_enable or args.train.agent_func_path or args.data.max_images_per_prompt:
@@ -92,8 +102,27 @@ def configure(args):
         raise ValueError("Invalid EAR clipping settings")
     if cfg["ear_res_clip"] is not None and cfg["ear_res_clip"] <= 0:
         raise ValueError("ear_res_clip must be positive or null")
-    if cfg["covo_variant"] not in ("paper", "released") or cfg["covo_aggregation"] not in ("vector", "linear"):
-        raise ValueError("Invalid CoVo variant or aggregation")
+    if cfg["covo_aggregation"] not in ("vector", "linear"):
+        raise ValueError("Invalid CoVo aggregation")
+    for key in (
+        "circa_cluster_weight",
+        "circa_certainty_weight",
+        "circa_format_weight",
+        "kl_cov_coef",
+    ):
+        if not math.isfinite(cfg[key]) or cfg[key] < 0:
+            raise ValueError(f"{key} must be finite and nonnegative")
+    if cfg["circa_cluster_weight"] + cfg["circa_certainty_weight"] == 0:
+        raise ValueError("CIRCA channel weights cannot both be zero")
+    if not math.isfinite(cfg["kl_cov_fraction"]) or not 0 <= cfg["kl_cov_fraction"] <= 1:
+        raise ValueError("kl_cov_fraction must be in [0, 1]")
+    if cfg["method"] == "circa" and (
+        args.actor.policy_loss_type != "ppo"
+        or args.actor.dual_clip is not None
+        or args.actor.loss_agg_mode != "token-mean"
+        or args.algo.advantage.is_correction_level != "off"
+    ):
+        raise ValueError("CIRCA KL-Cov requires token-mean PPO without dual clipping or IS correction")
     if cfg["covo_max_steps"] < 1 or cfg["score_concurrency"] < 1:
         raise ValueError("Scoring limits must be positive")
     if cfg["method"] == "ettrl" and cfg["tree_enabled"]:
@@ -124,12 +153,16 @@ def assign_advantages(maker, experiences):
     if len(indices) % group_size:
         raise ValueError("Incomplete BifocalRL prompt group")
     scores = {}
-    for name in ("mv", "sc", "entropy", "aux"):
+    score_names = ("mv", "sc", "entropy", "aux")
+    if cfg["method"] == "bifocalrl":
+        score_names += ("answer_cluster",)
+    for name in score_names:
         key = f"bifocal_{name}"
         required = (
             name == "mv"
+            or name == "answer_cluster"
             or (name in ("sc", "entropy") and cfg["method"] not in ("ttrl", "covo"))
-            or (name == "aux" and cfg["method"] in ("prism", "covo"))
+            or (name == "aux" and cfg["method"] in ("prism", "covo", "circa"))
         )
         parts = []
         for exp in experiences:
@@ -140,11 +173,16 @@ def assign_advantages(maker, experiences):
         ordered[indices] = torch.cat(parts)
         if not torch.isfinite(ordered).all():
             raise ValueError(f"Nonfinite {key}")
+        if name == "answer_cluster":
+            if (ordered != ordered.trunc()).any():
+                raise ValueError("bifocal_answer_cluster must contain integer IDs")
+            ordered = ordered.long()
         scores[name] = ordered.reshape(-1, group_size)
     gamma = cfg["prism_gamma"]
     if cfg["prism_gamma_schedule"] == "quadratic":
         steps = cfg["prism_gamma_steps"] or maker.bifocal_total_steps
         gamma *= max(0.0, 1 - maker.bifocal_step / max(1, steps - 1)) ** 2
+    diagnostics = {} if cfg["method"] == "bifocalrl" else None
     advantages = (
         compute_advantages(
             cfg["method"],
@@ -157,6 +195,10 @@ def assign_advantages(maker, experiences):
             ear_mode=cfg["ear_mode"],
             ear_beta=cfg["ear_beta"],
             ear_res_clip=cfg["ear_res_clip"],
+            cluster_weight=cfg["circa_cluster_weight"],
+            certainty_weight=cfg["circa_certainty_weight"],
+            diagnostics=diagnostics,
+            metadata={"answer_cluster_ids": scores.get("answer_cluster")},
         )
         .flatten()[indices]
         .split(sizes)
@@ -174,6 +216,14 @@ def assign_advantages(maker, experiences):
         exp.info["return"] = exp.rewards.float()
         exp.info["group_reward_std"] = scores["mv"].std(-1).repeat_interleave(group_size)[exp.index]
         exp.info["bifocal_gamma"] = torch.full_like(value, gamma)
+        if diagnostics is not None:
+            for name in (
+                "mv_weight", "snr", "snr_threshold",
+                "rollout_keep", "retained_fraction", "query_weight",
+                "sc_between_gamma", "sc_cluster_mean", "sc_cluster_size", "sc_within", "sc_adjusted",
+            ):
+                ordered = diagnostics[name].expand_as(scores["mv"]).flatten()
+                exp.info[f"bifocal_{name}"] = ordered[exp.index]
     if cfg["method"] == "covo":
         # Match the slime adapter's Reinforce++ convention, including Bessel correction.
         count = sum(exp.action_mask.sum() for exp in experiences).float()

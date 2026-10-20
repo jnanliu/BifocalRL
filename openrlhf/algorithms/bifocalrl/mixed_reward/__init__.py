@@ -4,7 +4,7 @@ Importing this package requires PyTorch, not Transformers, Accelerate or dataset
 """
 
 from .config import MixedRewardConfig
-from .core import compute_mixed_reward, compute_mixed_reward_advantages
+from .core import compute_mixed_reward
 from .registry import available_mixed_reward_modes, register_mixed_reward_mode
 from .types import MixedRewardContext, MixedRewardResult
 
@@ -13,7 +13,6 @@ __all__ = [
     "MixedRewardContext",
     "MixedRewardResult",
     "compute_mixed_reward",
-    "compute_mixed_reward_advantages",
     "available_mixed_reward_modes",
     "register_mixed_reward_mode",
 ]

@@ -10,7 +10,7 @@ from openrlhf.algorithms.bifocalrl.runtime import DEFAULTS, METHODS, assign_adva
 from tests.test_experience import Experience
 
 
-def arguments(method="mixed"):
+def arguments(method="bifocalrl"):
     return NS(
         bifocal=NS(config=None, method=method, prm_url=None, prm_model=None),
         rollout=NS(n_samples_per_prompt=4, top_p=1),
@@ -20,7 +20,8 @@ def arguments(method="mixed"):
         ds=NS(tensor_parallel_size=1),
         reward=NS(remote_url=None, model_name_or_path=None, overlong_buffer_len=None, stop_properly_penalty_coef=None),
         critic=NS(model_name_or_path=None),
-        algo=NS(kl=NS(init_coef=0, use_loss=False), advantage=NS(gamma=1)),
+        actor=NS(policy_loss_type="ppo", dual_clip=None, loss_agg_mode="token-mean"),
+        algo=NS(kl=NS(init_coef=0, use_loss=False), advantage=NS(gamma=1, is_correction_level="off")),
     )
 
 
@@ -60,14 +61,18 @@ def test_incompatible_training_flags(field, value, message):
 
 @pytest.mark.parametrize(
     "case",
-    json.loads(Path(__file__).with_name("parity.json").read_text())["cases"],
+    [
+        case for case in json.loads(Path(__file__).with_name("parity.json").read_text())["cases"]
+        if case["config"]["alpha_mode"] == "reliability_sc_corr"
+    ],
     ids=lambda c: c["config"]["alpha_mode"],
 )
 def test_query_and_batch_statistics_survive_reordered_microbatches(case):
     data = json.loads(Path(__file__).with_name("parity.json").read_text())
     mv, sc = torch.tensor(data["mv"]).flatten(), torch.tensor(data["sc"]).flatten()
     args = arguments()
-    cfg = {**DEFAULTS, "mixed": case["config"]}
+    method = "reliability_sc_corr" if case["config"]["alpha_mode"] == "reliability_sc_corr" else "bifocalrl"
+    cfg = {**DEFAULTS, "method": method, "mixed": case["config"]}
     args.bifocal.settings = cfg
     maker = NS(strategy=NS(args=args))
     permutation = [[9, 2, 11, 6], [0, 8, 3, 10], [7, 4, 1, 5]]

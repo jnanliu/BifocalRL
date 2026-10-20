@@ -2,13 +2,20 @@
 
 The `mixed_reward/`, `normalization.py`, `voting.py`, and `legacy/` modules were
 migrated from the local BifocalRL implementation. Their runtime imports are local
-to this package. The numerical fusion behavior is retained and covered by parity
-fixtures generated from the source implementation.
+to this package. Historical fixed and reliability fusion are covered by parity
+fixtures generated from the source implementation. Current BifocalRL uses
+fixed-threshold GD2PO SNR filtering on the original normalized MV/SC signals,
+attenuates SC answer-cluster means among retained responses, then applies equal
+fusion weights, query reweighting and retained-batch normalization as documented
+in the example README. The answer-conditioned SC decomposition is a local
+extension, not part of the GD2PO paper.
 
 `legacy/math.py` retains the PRIME/TTRL Apache-2.0 notice in its source. Other
 ported files follow their source repository's license. No CoVo source files were
-copied; its formulas and the documented released reward conventions were
-independently implemented after consulting the paper and public repository.
+copied; its paper formulas were independently implemented. The CIRCA
+cluster/format rewards, GDPO advantages and KL-Cov loss were independently
+implemented from the paper's equations and hyperparameters; no author code
+was available at the linked paper when this implementation was written.
 
 References:
 
@@ -19,3 +26,5 @@ References:
 - CoVo: https://arxiv.org/abs/2506.08745 (v1), https://github.com/sastpg/CoVo
 - PRISM: https://arxiv.org/abs/2601.04700 (v1)
 - GenPRM interface: https://github.com/RyanLiu112/GenPRM
+- CIRCA + KL-Cov: https://arxiv.org/abs/2605.22620 (v1), Eqs. 2--8 and Appendix F
+- GD2PO filtering/reweighting: https://arxiv.org/abs/2606.16771 (v1), Eqs. 10--12 and 19

@@ -47,19 +47,30 @@ class Engine:
         return NS(outputs=[NS(token_ids=tokens, logprobs=logprobs, finish_reason="stop")])
 
 
-def test_training_voting_never_reads_label_and_preserves_group():
+@pytest.mark.parametrize("method", ["ttrl", "bifocalrl"])
+def test_training_voting_never_reads_label_and_preserves_group(method):
     class UnreadableLabel:
         def __str__(self):
             raise AssertionError("Training tried to read a ground truth label")
 
     engine = Engine([r"\boxed{1}", r"\boxed{1}", r"\boxed{1}", r"\boxed{2}"])
-    params = SamplingParams(extra_args={"bifocal": {**DEFAULTS, "method": "ttrl"}})
+    params = SamplingParams(extra_args={"bifocal": {**DEFAULTS, "method": method}})
     output = asyncio.run(generate_group("q", UnreadableLabel(), params, 128, Tokenizer(), engine, 4))
     assert [r["reward"] for r in output] == [1, 1, 1, 0]
     assert all(call[1].extra_args is None for call in engine.calls)
     for record in output:
         assert len(record["observation_tokens"]) == len(record["rollout_log_probs"])
         assert record["action_ranges"][0][0] == 1
+
+
+def test_bifocal_answer_clusters_use_math_equivalence_and_separate_invalid_answers():
+    engine = Engine([
+        r"\boxed{\frac{1}{2}}", r"\boxed{0.5}", r"\boxed{1/2}",
+        "no answer", "no answer", r"\boxed{2}", r"\boxed{2}", r"\boxed{3}",
+    ])
+    params = SamplingParams(extra_args={"bifocal": DEFAULTS})
+    records = asyncio.run(generate_group("q", "unused", params, 128, Tokenizer(), engine, 8))
+    assert [r["extra_logs"]["bifocal_answer_cluster"] for r in records] == [0, 0, 0, 1, 2, 3, 3, 4]
 
 
 def test_etmr_resamples_fork_and_keeps_prefix_trainable():
@@ -132,10 +143,11 @@ def test_teacher_forcing_rejects_missing_target(monkeypatch):
         asyncio.run(score_continuation(BrokenEngine(), [1], [2]))
 
 
-def test_tree_records_survive_native_experience_padding_and_batching():
+@pytest.mark.parametrize("method", ["ettrl", "bifocalrl"])
+def test_rollout_records_survive_native_experience_padding_and_batching(method):
     root = "reason\n" + r"\boxed{1}"
     engine = Engine([root] + [r"\boxed{2}"] * 4)
-    cfg = {**DEFAULTS, "method": "ettrl", "tree_roots": 1, "tree_forks": 2, "tree_branches": 2}
+    cfg = {**DEFAULTS, "method": method, "tree_roots": 1, "tree_forks": 2, "tree_branches": 2}
     records = asyncio.run(
         generate_group("q", "unused", SamplingParams(extra_args={"bifocal": cfg}), 128, Tokenizer(), engine, 5)
     )
@@ -153,3 +165,5 @@ def test_tree_records_survive_native_experience_padding_and_batching():
     assert len(batch.sequences) == 5
     assert all(len(value) == 5 for value in batch.info.values())
     assert batch.action_mask[:, 0].tolist() == [1] * 5
+    if method == "bifocalrl":
+        assert batch.info["bifocal_answer_cluster"].tolist() == [0, 1, 1, 1, 1]
