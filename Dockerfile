@@ -51,7 +51,8 @@ RUN git clone --depth=1 https://github.com/bytedance/SandboxFusion.git \
 
 # Keep SandboxFusion's dependencies separate from the training environment.
 # NVIDIA's pip constraints apply to the training environment only.
-RUN python -m venv "$SANDBOXFUSION_RUNTIME_PATH" \
+RUN unset LD_LIBRARY_PATH LD_PRELOAD PYTHONPATH PYTHONHOME \
+    && python -m venv "$SANDBOXFUSION_RUNTIME_PATH" \
     && PIP_CONSTRAINT= PIP_BUILD_CONSTRAINT= "$SANDBOXFUSION_PYTHON" -m pip install \
         torch --index-url https://download.pytorch.org/whl/cpu \
     && PIP_CONSTRAINT= PIP_BUILD_CONSTRAINT= "$SANDBOXFUSION_PYTHON" -m pip install \
@@ -61,12 +62,15 @@ RUN python -m venv "$SANDBOXFUSION_RUNTIME_PATH" \
     && rm /tmp/sandboxfusion-runtime-requirements.txt \
     && chmod -R a+rX "$SANDBOXFUSION_HOME"
 
-RUN "$SANDBOXFUSION_PYTHON" -c \
+# NGC puts its training libtorch first in LD_LIBRARY_PATH, even inside a venv.
+RUN unset LD_LIBRARY_PATH LD_PRELOAD PYTHONPATH PYTHONHOME \
+    && "$SANDBOXFUSION_PYTHON" -c \
         'import nltk; nltk.download("punkt"); nltk.download("stopwords")' \
     && "$SANDBOXFUSION_PYTHON" -c \
-        'import numpy, pandas, sandbox, scipy, sklearn, torch, uvicorn; print("SandboxFusion isolated runtime OK")' \
+        'import numpy, pandas, sandbox, scipy, sklearn, torch, uvicorn; assert torch.version.cuda is None; assert (torch.tensor([1, 2]) + 1).tolist() == [2, 3]; print("SandboxFusion isolated runtime OK", torch.__version__, torch._C.__file__)' \
     && printf '%s\n' \
         '#!/bin/sh' \
+        'unset LD_LIBRARY_PATH LD_PRELOAD PYTHONPATH PYTHONHOME' \
         'export TMPDIR="${SANDBOXFUSION_WORK_DIR:-/mnt/sandboxfusion}"' \
         'cd "$SANDBOXFUSION_HOME" || exit 1' \
         'exec "$SANDBOXFUSION_PYTHON" -m uvicorn sandbox.server.server:app --host "${HOST:-127.0.0.1}" --port "${_BYTEFAAS_RUNTIME_PORT:-8080}" "$@"' \
