@@ -55,7 +55,7 @@ RUN python -m venv "$SANDBOXFUSION_RUNTIME_PATH" \
     && PIP_CONSTRAINT= PIP_BUILD_CONSTRAINT= "$SANDBOXFUSION_PYTHON" -m pip install \
         torch --index-url https://download.pytorch.org/whl/cpu \
     && PIP_CONSTRAINT= PIP_BUILD_CONSTRAINT= "$SANDBOXFUSION_PYTHON" -m pip install \
-        --requirements /tmp/sandboxfusion-runtime-requirements.txt \
+        -r /tmp/sandboxfusion-runtime-requirements.txt \
         --editable "$SANDBOXFUSION_HOME" \
     && "$SANDBOXFUSION_PYTHON" -m pip check \
     && rm /tmp/sandboxfusion-runtime-requirements.txt \
