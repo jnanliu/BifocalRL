@@ -47,14 +47,42 @@ fi
 if [[ -n "${PRM_MODEL:-}" ]]; then
   EXTRA+=(--bifocal.prm_model "$PRM_MODEL")
 fi
+if [[ -n "${SANDBOX_FUSION_URL:-}" ]]; then
+  EXTRA+=(--bifocal.sandbox_fusion_url "$SANDBOX_FUSION_URL")
+fi
+eval_config_given=false
+for argument in "$@"; do
+  if [[ "$argument" == --eval.config || "$argument" == --eval.config=* ]]; then
+    eval_config_given=true
+  fi
+done
+if [[ -n "${EVAL_CONFIG:-}" ]]; then
+  EXTRA+=(--eval.config "$EVAL_CONFIG")
+  eval_config_given=true
+fi
+if [[ "$eval_config_given" == false && -n "${EVAL_DATA:-}" ]]; then
+  EVAL_SPLIT="${EVAL_SPLIT:-train}"
+  EVAL_STEPS="${EVAL_STEPS:-10}"
+  EVAL_TEMPERATURE="${EVAL_TEMPERATURE:-0}"
+  EVAL_N_SAMPLES_PER_PROMPT="${EVAL_N_SAMPLES_PER_PROMPT:-1}"
+fi
 if [[ -n "${EVAL_DATA:-}" ]]; then
-  EXTRA+=(
-    --eval.dataset "$EVAL_DATA"
-    --eval.split "${EVAL_SPLIT:-train}"
-    --eval.steps "${EVAL_STEPS:-10}"
-    --eval.temperature 0
-    --eval.n_samples_per_prompt 1
-  )
+  EXTRA+=(--eval.dataset "$EVAL_DATA")
+fi
+if [[ -n "${EVAL_SPLIT:-}" ]]; then
+  EXTRA+=(--eval.split "$EVAL_SPLIT")
+fi
+if [[ -n "${EVAL_STEPS:-}" ]]; then
+  EXTRA+=(--eval.steps "$EVAL_STEPS")
+fi
+if [[ -n "${EVAL_TEMPERATURE:-}" ]]; then
+  EXTRA+=(--eval.temperature "$EVAL_TEMPERATURE")
+fi
+if [[ -n "${EVAL_N_SAMPLES_PER_PROMPT:-}" ]]; then
+  EXTRA+=(--eval.n_samples_per_prompt "$EVAL_N_SAMPLES_PER_PROMPT")
+fi
+if [[ -n "${EVAL_N_SAMPLES_PER_PROMPT_BY_DATASOURCE:-}" ]]; then
+  EXTRA+=(--eval.n_samples_per_prompt_by_datasource "$EVAL_N_SAMPLES_PER_PROMPT_BY_DATASOURCE")
 fi
 
 exec "${PYTHON:-python}" -m openrlhf.cli.train_ppo_ray \

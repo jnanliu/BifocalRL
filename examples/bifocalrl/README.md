@@ -58,21 +58,24 @@ python -m openrlhf.cli.train_ppo_ray \
 python examples/bifocalrl/prepare_data.py DigitalLearningGmbH/MATH-lighteval data/train.jsonl \
   --split train --prompt-key problem
 python examples/bifocalrl/prepare_data.py HuggingFaceH4/MATH-500 data/math500.jsonl \
-  --split test --prompt-key problem --label-key answer
+  --split test --prompt-key problem --label-key answer --datasource math500
 python examples/bifocalrl/prepare_data.py openai/gsm8k data/gsm8k.jsonl \
-  --subset main --split test --prompt-key question --label-key answer --label-format gsm8k
+  --subset main --split test --prompt-key question --label-key answer --label-format gsm8k --datasource gsm8k
 ```
 
 默认输出：
 
 ```json
-{"prompt": [{"role": "user", "content": "问题，请把最终答案放入 \\boxed{}"}]}
+{"prompt": [{"role": "user", "content": "问题，请把最终答案放入 \\boxed{}"}], "datasource": "default"}
 ```
 
 训练数据无需 label。投票保留原仓库 boxed 数学答案抽取逻辑，prompt 应明确要求
 `\boxed{...}`。`--plain-prompts` 保留字符串格式，可配合
 `APPLY_CHAT_TEMPLATE=0` 用于没有 chat template 的 base 模型。
 `--revision` 可固定 HF 数据版本，`--limit` 用于小规模检查。
+输出始终包含 `datasource`：`--datasource` 优先覆盖所有记录；未指定时保留原字段，
+原字段缺失、为空或为 null 时使用 `default`。多 benchmark 评估请指定不同名称，
+例如 `--datasource math500` 与 `--datasource gsm8k`。
 
 OpenRLHF 原生 `--data.prompt_dataset` 也支持 HF repo ID、JSON/JSONL、Parquet
 及 `save_to_disk` 目录；直接使用 HF 数据时按实际列名设置 `--data.input_key`。
@@ -85,12 +88,122 @@ EVAL_DATA=data/math500.jsonl EVAL_STEPS=10 \
   bash examples/bifocalrl/run.sh reliability_sc_corr
 ```
 
+也可将评估参数集中放在独立 JSON 中，与算法 recipe 分开管理：
+
+```bash
+EVAL_CONFIG=examples/bifocalrl/eval_configs/math.json \
+  bash examples/bifocalrl/run.sh bifocalrl
+
+EVAL_CONFIG=examples/bifocalrl/eval_configs/math_code.json \
+  bash examples/bifocalrl/run.sh bifocalrl
+```
+
+原生入口使用 `--eval.config <path>`。示例见
+[`math.json`](eval_configs/math.json) 和 [`math_code.json`](eval_configs/math_code.json)。
+JSON 键名与 `--eval.*` 去掉前缀后相同：
+
+| JSON 字段 | 用途 |
+| --- | --- |
+| `dataset` | 单个/逗号分隔路径字符串，或数据集路径数组；相对路径按运行目录解析 |
+| `split`, `steps`, `temperature` | 全局评估 split、间隔和温度；steps 为 -1 时禁用周期评估 |
+| `n_samples_per_prompt` | 全局采样数 |
+| `n_samples_per_prompt_by_datasource` | 各 datasource 采样数的 JSON 对象 |
+| `label_key` | eval 专用标签列，不改变训练数据读取 |
+| `sandbox_fusion_url`, `sandbox_timeout`, `sandbox_memory_limit_mb`, `sandbox_concurrency` | 代码评估服务配置 |
+
+覆盖顺序为 **命令行显式参数 > eval JSON > 原有默认值/算法中的兼容配置**。
+脚本中显式设置的 `EVAL_DATA`、`EVAL_STEPS` 等环境变量会转换为命令行参数，
+因此可以覆盖 JSON；使用 EVAL_CONFIG 时，脚本不会自动注入 greedy/n=1 等旧默认值。
+例如 `EVAL_CONFIG=... bash examples/bifocalrl/run.sh bifocalrl --eval.steps 20`。
+未知字段和非法类型会在启动训练前报错。
+
 评估默认从 `label` 列读取正确答案，可在算法 JSON 中设置 `eval_label_key`。
 这一覆盖仅作用于 eval Dataset，训练集仍可完全没有标签列。
-评估走普通并行生成与数学答案判定，不运行 ETMR、PRM 或训练伪奖励。
+评估走普通并行生成，按 label 选择数学判定或下述代码执行判定，不运行 ETMR、PRM 或训练伪奖励。
 原生 eval 记录 datasource 的 pass@1/pass@k，可在数据中加入 `datasource` 区分 benchmark。
 多个评估文件可用 `EVAL_DATA=file1.jsonl,file2.jsonl`；此时文件需使用相同 prompt/label schema。
 本目录未内置或下载 benchmark 数据。
+
+每个数据源可以覆盖全局 `n_samples_per_prompt`，配置键是记录中的 `datasource`，不是文件路径：
+
+```bash
+EVAL_DATA=data/math500.jsonl,data/code_eval.jsonl \
+EVAL_N_SAMPLES_PER_PROMPT=4 \
+EVAL_N_SAMPLES_PER_PROMPT_BY_DATASOURCE='{"math500":1,"livecodebench":8}' \
+SANDBOX_FUSION_URL=http://127.0.0.1:8080/run_code \
+  bash examples/bifocalrl/run.sh bifocalrl --eval.temperature 0.6
+```
+
+原生 CLI 对应 `--eval.n_samples_per_prompt 4`
+和 `--eval.n_samples_per_prompt_by_datasource '{"math500":1,"livecodebench":8}'`。
+未列出的 datasource 沿用全局值；采样数必须为正整数。所有数据源仍共用 `eval.temperature`。
+旧 EVAL_DATA 模式默认温度为 0；多次采样要获得随机性时需设置非零温度。
+
+上述配置分别生成 `eval_math500_pass1`、`eval_livecodebench_pass1/pass8`；
+`eval_<datasource>_n_samples_per_prompt` 记录实际采样数。
+指标按题目编号及实际组大小汇总，不会将不同数据源的回答按统一 k 强行 reshape。
+
+### 代码 benchmark：Sandbox Fusion
+
+代码 eval 按需调用 VERL 的
+[`verl.utils.reward_score.sandbox_fusion.compute_score`](https://github.com/volcengine/verl/blob/main/verl/utils/reward_score/sandbox_fusion/__init__.py)。
+在所有 vLLM worker 的环境安装可提供该接口的 VERL，例如 `pip install -e '.[code_eval]'`，
+并准备 worker 可以访问的 Sandbox Fusion `/run_code` 服务。数学评估不需要 VERL。
+生成程序只送往该服务执行。
+
+先将 benchmark 导出为包含完整 prompt 和测试用例的 JSONL：
+
+```json
+{"prompt":"Read an integer from stdin and print twice its value. Return Python code in a fenced code block.","tests":{"inputs":["2\n","3\n"],"outputs":["4","6"]}}
+```
+
+然后转换并与数学数据一起评估：
+
+```bash
+python examples/bifocalrl/prepare_data.py data/code_tests.jsonl data/code_eval.jsonl \
+  --prompt-key prompt --label-key tests --label-format sandbox_fusion --datasource livecodebench
+
+SANDBOX_FUSION_URL=http://127.0.0.1:8080/run_code \
+EVAL_DATA=data/math500.jsonl,data/code_eval.jsonl EVAL_STEPS=10 \
+  bash examples/bifocalrl/run.sh bifocalrl
+```
+
+代码 label 被序列化为 JSON 字符串，内部格式是
+`{"backend":"sandbox_fusion","test_cases":{"inputs":[...],"outputs":[...]}}`，
+以便与数学题的字符串 label 一起加载。`test_cases` 本身也可以是 JSON 字符串。
+`datasource` 负责指标分组，`backend` 负责评分；仅把 datasource 命名为 livecodebench 不会启用代码评分。
+
+支持 Python stdin/stdout 题、带 `fn_name` 的函数或 `Solution` 方法题，以及
+`assert_case` 列表。函数参数使用每行一个 JSON 值的输入字符串；prompt 应包含题目的
+starter code/函数签名，并要求 fenced Python code block。代码提取、函数包装及输出比较由 VERL 处理。
+对于 LiveCodeBench，可使用其导出的 `input_output`（inputs/outputs/fn_name）作为 tests 列，
+须包含评估所需的公开与私有用例；本转换器不直接解码原始发布数据中的压缩私有用例。
+该后端采用 VERL 的判定语义，不等价于接入 LiveCodeBench 官方完整评测 harness。
+
+代码服务参数可放入独立 eval JSON，例如：
+
+```json
+{
+  "sandbox_fusion_url": "http://127.0.0.1:8080/run_code",
+  "sandbox_timeout": 10,
+  "sandbox_memory_limit_mb": 1024,
+  "sandbox_concurrency": 16
+}
+```
+
+`sandbox_timeout` 是每个测试用例的编译/运行超时秒数，`sandbox_memory_limit_mb` 是内存限制。
+`sandbox_concurrency` 限制同一 worker 内测试用例的并发请求数；URL 也可通过
+`--eval.sandbox_fusion_url` 或脚本环境变量 `SANDBOX_FUSION_URL` 指定。
+旧 `--bifocal.sandbox_fusion_url` 是同一参数的兼容别名。
+算法 JSON 中原有 sandbox 字段及 `score_concurrency` 仍作为未覆盖时的后备值；
+eval JSON 的并发数、超时和内存只覆盖评估，不改变 PRISM 等训练评分配置。
+
+VERL 返回的测试用例通过率额外记录为 `eval_livecodebench_test_pass_rate`。
+只有程序通过全部用例才赋 1，否则赋 0，再计算现有的
+`eval_livecodebench_pass1/passK`，不会把部分用例通过率当作 pass@k。
+服务连接/内部错误会使评估报错；错误答案、编译/运行错误、用例执行超时及缺少代码块记为 0。
+旧 EVAL_DATA 模式默认 greedy、每题一条回答；采样评估可在末尾传入
+`--eval.temperature 0.6 --eval.n_samples_per_prompt 8`。
 
 ## 配置与环境变量
 
@@ -204,7 +317,12 @@ entropy 等独立训练项按原配置计算，不执行额外重采样。
 | `KL_COEF` | 默认 0；`circa` recipe 默认 0.005 并启用 reference KL loss |
 | `PROMPT_SPLIT`, `APPLY_CHAT_TEMPLATE` | train、1 |
 | `EVAL_DATA`, `EVAL_SPLIT`, `EVAL_STEPS` | 未设置、train、10 |
+| `EVAL_CONFIG` | 独立 eval JSON，默认未设置 |
+| `EVAL_TEMPERATURE` | 覆盖评估温度；旧 EVAL_DATA 模式默认为 0，使用 JSON 时继承文件值 |
+| `EVAL_N_SAMPLES_PER_PROMPT` | 覆盖全局采样数；旧模式默认 1，JSON 模式继承文件或原生默认值 |
+| `EVAL_N_SAMPLES_PER_PROMPT_BY_DATASOURCE` | JSON 字符串，按 datasource 覆盖采样数，默认未设置 |
 | `PRM_URL`, `PRM_MODEL` | 独立 GenPRM 服务及匹配的 tokenizer |
+| `SANDBOX_FUSION_URL` | 代码评估的 Sandbox Fusion `/run_code` 服务，默认未设置 |
 | `PYTHON` | python |
 
 ## CIRCA 与 KL-Cov

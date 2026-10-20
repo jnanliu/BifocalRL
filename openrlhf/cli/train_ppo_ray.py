@@ -1,6 +1,9 @@
 import argparse
+import json
+import math
 import os
 from datetime import datetime
+from pathlib import Path
 
 import ray
 from ray.util.placement_group import placement_group
@@ -578,12 +581,21 @@ if __name__ == "__main__":
         help="sampling probs for datasets",
     )
     parser.add_argument("--data.prompt_split", type=str, default="train")
+    parser.add_argument("--eval.config", type=str, default=None, help="Independent evaluation JSON configuration")
     parser.add_argument("--eval.dataset", type=str, default=None, help="Path to the evaluation dataset")
     parser.add_argument("--eval.split", type=str, default="train")
     parser.add_argument("--eval.temperature", type=float, default=0.6, help="Temperature for evaluation")
     parser.add_argument(
         "--eval.n_samples_per_prompt", type=int, default=4, help="Number of samples per prompt for evaluation"
     )
+    parser.add_argument(
+        "--eval.n_samples_per_prompt_by_datasource", type=str, default=None,
+        help='JSON overrides keyed by datasource, e.g. {"math500":1,"livecodebench":8}',
+    )
+    parser.add_argument("--eval.label_key", type=str, default=None, help="Override the label column for evaluation only")
+    parser.add_argument("--eval.sandbox_timeout", type=float, default=None, help="Sandbox per-case timeout in seconds")
+    parser.add_argument("--eval.sandbox_memory_limit_mb", type=int, default=None)
+    parser.add_argument("--eval.sandbox_concurrency", type=int, default=None)
 
     parser.add_argument("--data.input_key", type=str, default="input", help="JSON dataset key")
     parser.add_argument("--data.label_key", type=str, default=None, help="JSON dataset key")
@@ -631,7 +643,56 @@ if __name__ == "__main__":
     # ModelScope parameters
     parser.add_argument("--use_ms", action="store_true", default=False)
 
+    args = parser.parse_known_args()[0]
+    eval_config_path = getattr(args, "eval.config")
+    if eval_config_path:
+        eval_config = json.loads(Path(eval_config_path).read_text())
+        eval_actions = {
+            action.dest.removeprefix("eval."): action
+            for action in parser._actions
+            if action.dest.startswith("eval.") and action.dest != "eval.config"
+        }
+        if not isinstance(eval_config, dict) or eval_config.keys() - eval_actions.keys():
+            parser.error("Eval JSON must be an object containing only supported eval settings")
+        eval_defaults = {}
+        for key, value in eval_config.items():
+            action = eval_actions[key]
+            if key == "dataset" and isinstance(value, list):
+                if not value or any(not isinstance(path, str) or not path.strip() for path in value):
+                    parser.error("Eval dataset array must contain nonempty dataset paths")
+                value = ",".join(value)
+            if key == "n_samples_per_prompt_by_datasource" and isinstance(value, dict):
+                value = json.dumps(value)
+            if value is None:
+                if action.default is not None:
+                    parser.error(f"Eval setting {key} cannot be null")
+            elif (
+                (action.type is int and type(value) is not int)
+                or (action.type is float and type(value) not in (int, float))
+                or (action.type is str and not isinstance(value, str))
+            ):
+                parser.error(f"Invalid type for eval setting {key}")
+            eval_defaults[action.dest] = value
+        parser.set_defaults(**eval_defaults)
     args = parser.parse_args()
+    if getattr(args, "eval.steps") != -1 and getattr(args, "eval.steps") <= 0:
+        parser.error("eval.steps must be positive, or -1 to disable evaluation")
+    if getattr(args, "eval.n_samples_per_prompt") < 1:
+        parser.error("eval.n_samples_per_prompt must be positive")
+    eval_overrides = getattr(args, "eval.n_samples_per_prompt_by_datasource")
+    if eval_overrides is not None:
+        try:
+            eval_overrides = json.loads(eval_overrides)
+        except json.JSONDecodeError:
+            parser.error("eval.n_samples_per_prompt_by_datasource must be a JSON object")
+        if not isinstance(eval_overrides, dict) or any(type(n) is not int or n < 1 for n in eval_overrides.values()):
+            parser.error("eval.n_samples_per_prompt_by_datasource must map names to positive integers")
+    if not math.isfinite(getattr(args, "eval.temperature")) or getattr(args, "eval.temperature") < 0:
+        parser.error("eval.temperature must be finite and nonnegative")
+    for key in ("sandbox_timeout", "sandbox_memory_limit_mb", "sandbox_concurrency"):
+        value = getattr(args, f"eval.{key}")
+        if value is not None and (not math.isfinite(value) or value <= 0):
+            parser.error(f"eval.{key} must be finite and positive")
     from openrlhf.utils.config import hierarchize
 
     args = hierarchize(args)

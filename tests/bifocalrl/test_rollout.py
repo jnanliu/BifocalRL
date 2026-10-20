@@ -1,6 +1,8 @@
 import ast
 import asyncio
+import json
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace as NS
 
@@ -41,9 +43,9 @@ class Engine:
             lp = -0.1 if prefix[-1] == ord("1") else -2 if prefix[-1] == ord("2") else -0.7
             return NS(prompt_logprobs=[{token: NS(logprob=lp)} for token in prefix])
         tokens = list(next(self.outputs).encode())
-        logprobs = [
-            {token: NS(logprob=(-9.0 if i == 1 else -8.0 if i == 3 else -0.1))} for i, token in enumerate(tokens)
-        ]
+        logprobs = [{
+            token: NS(logprob=(-9.0 if i == 1 else -8.0 if i == 3 else -0.1))
+        } for i, token in enumerate(tokens)]
         return NS(outputs=[NS(token_ids=tokens, logprobs=logprobs, finish_reason="stop")])
 
 
@@ -65,8 +67,14 @@ def test_training_voting_never_reads_label_and_preserves_group(method):
 
 def test_bifocal_answer_clusters_use_math_equivalence_and_separate_invalid_answers():
     engine = Engine([
-        r"\boxed{\frac{1}{2}}", r"\boxed{0.5}", r"\boxed{1/2}",
-        "no answer", "no answer", r"\boxed{2}", r"\boxed{2}", r"\boxed{3}",
+        r"\boxed{\frac{1}{2}}",
+        r"\boxed{0.5}",
+        r"\boxed{1/2}",
+        "no answer",
+        "no answer",
+        r"\boxed{2}",
+        r"\boxed{2}",
+        r"\boxed{3}",
     ])
     params = SamplingParams(extra_args={"bifocal": DEFAULTS})
     records = asyncio.run(generate_group("q", "unused", params, 128, Tokenizer(), engine, 8))
@@ -77,16 +85,20 @@ def test_etmr_resamples_fork_and_keeps_prefix_trainable():
     root = "reason\n" + r"\boxed{1}"
     engine = Engine([root] + [r"\boxed{2}"] * 4)
     params = SamplingParams(
-        extra_args={"bifocal": {**DEFAULTS, "method": "ettrl", "tree_roots": 1, "tree_forks": 2, "tree_branches": 2}}
-    )
+        extra_args={"bifocal": {
+            **DEFAULTS, "method": "ettrl",
+            "tree_roots": 1,
+            "tree_forks": 2,
+            "tree_branches": 2
+        }})
     output = asyncio.run(generate_group("q", "unused", params, 128, Tokenizer(), engine, 5))
     assert len(output) == 5
     assert all(set(r["extra_logs"]) == set(output[0]["extra_logs"]) for r in output)
     assert [r["extra_logs"].get("etmr_fork") for r in output[1:]] == [1, 1, 3, 3]
     for branch in output[1:]:
         fork = branch["extra_logs"]["etmr_fork"]
-        assert branch["observation_tokens"][1 : fork + 1] == list(root.encode())[:fork]
-        assert branch["rollout_log_probs"][1 : fork + 1] == output[0]["rollout_log_probs"][1 : fork + 1]
+        assert branch["observation_tokens"][1:fork + 1] == list(root.encode())[:fork]
+        assert branch["rollout_log_probs"][1:fork + 1] == output[0]["rollout_log_probs"][1:fork + 1]
         assert branch["action_ranges"] == [(1, len(branch["observation_tokens"]))]
 
 
@@ -105,6 +117,137 @@ def test_eval_disables_tree_and_uses_label():
     output = asyncio.run(generate_group("q", "reasoning\n#### 2", params, 128, Tokenizer(), engine, 1))
     assert output[0]["reward"] == 1
     assert len(engine.calls) == 1
+
+
+@pytest.mark.parametrize("encoded", [False, True])
+def test_code_eval_delegates_to_verl_and_requires_all_tests_to_pass(monkeypatch, encoded):
+    calls = []
+    main_thread = threading.get_ident()
+    cases = {"inputs": ["secret", "second"], "outputs": ["1", "2"], "fn_name": "solve"}
+
+    def compute_score(**kwargs):
+        assert threading.get_ident() != main_thread
+        assert kwargs["test_cases"] == cases
+        assert kwargs["sandbox_fusion_url"] == "http://sandbox/run_code"
+        assert kwargs["timeout"] == 5 and kwargs["memory_limit_mb"] == 512
+        assert not kwargs["continuous"]
+        assert isinstance(kwargs["concurrent_semaphore"], threading.BoundedSemaphore)
+        calls.append(kwargs)
+        return (1. if len(calls) == 1 else 0.5), [{"status": "success"}, {"status": "wrong_answer"}]
+
+    monkeypatch.setitem(sys.modules, "verl.utils.reward_score.sandbox_fusion", NS(compute_score=compute_score))
+    label = {"backend": "sandbox_fusion", "test_cases": json.dumps(cases) if encoded else cases}
+    engine = Engine(["```python\nprint(1)\n```", "```python\nprint(2)\n```"])
+    cfg = {
+        **DEFAULTS, "method": "ettrl",
+        "sandbox_fusion_url": "http://sandbox/",
+        "sandbox_timeout": 5,
+        "sandbox_memory_limit_mb": 512
+    }
+    params = SamplingParams(extra_args={"bifocal": cfg, "bifocal_evaluation": True})
+    records = asyncio.run(
+        generate_group("q",
+                       json.dumps(label) if encoded else label, params, 128, Tokenizer(), engine, 2))
+    assert [r["reward"] for r in records] == [1., 0.]
+    assert [r["extra_logs"]["code_test_pass_rate"] for r in records] == [1., 0.5]
+    assert all(r["extra_logs"]["code_num_tests"] == 2 for r in records)
+    assert all("secret" not in bytes(prefix).decode() for prefix, _ in engine.calls)
+    assert len(calls) == 2  # Evaluation bypasses ETMR and the training reward.
+
+
+@pytest.mark.parametrize("execution", [
+    [{
+        "status": "api_error",
+        "api_request_error": "connection refused"
+    }],
+    [{
+        "status": "sandbox_error"
+    }],
+    [{
+        "status": "unknown_failure"
+    }],
+    [{
+        "error": "Invalid test_cases structure"
+    }],
+    [],
+])
+def test_code_eval_service_and_data_errors_do_not_become_incorrect_programs(monkeypatch, execution):
+    monkeypatch.setitem(sys.modules, "verl.utils.reward_score.sandbox_fusion",
+                        NS(compute_score=lambda **kwargs: (0., execution)))
+    cfg = {**DEFAULTS, "sandbox_fusion_url": "http://sandbox/run_code"}
+    params = SamplingParams(extra_args={"bifocal": cfg, "bifocal_evaluation": True})
+    label = {"backend": "sandbox_fusion", "test_cases": {"inputs": ["1"], "outputs": ["2"]}}
+    with pytest.raises(RuntimeError, match="Sandbox Fusion"):
+        asyncio.run(generate_group("q", label, params, 128, Tokenizer(), Engine(["```python\npass\n```"]), 1))
+
+
+@pytest.mark.parametrize("status",
+                         ["wrong_answer", "compile_error", "compile_error_skipped", "runtime_error", "timeout"])
+def test_code_eval_program_failures_are_zero_scores(monkeypatch, status):
+    monkeypatch.setitem(sys.modules, "verl.utils.reward_score.sandbox_fusion",
+                        NS(compute_score=lambda **kwargs: (0., [{
+                            "status": status
+                        }])))
+    cfg = {**DEFAULTS, "sandbox_fusion_url": "http://sandbox"}
+    params = SamplingParams(extra_args={"bifocal": cfg, "bifocal_evaluation": True})
+    label = {"backend": "sandbox_fusion", "test_cases": {"assert_case": ["assert solve() == 1"]}}
+    records = asyncio.run(generate_group("q", label, params, 128, Tokenizer(), Engine(["```python\npass\n```"]), 1))
+    assert records[0]["reward"] == 0.
+
+
+def test_code_eval_missing_code_block_is_an_incorrect_program(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules, "verl.utils.reward_score.sandbox_fusion",
+        NS(compute_score=lambda **kwargs: (0., [{
+            "error": "Invalid completion (missing code block)"
+        }])))
+    cfg = {**DEFAULTS, "sandbox_fusion_url": "http://sandbox"}
+    params = SamplingParams(extra_args={"bifocal": cfg, "bifocal_evaluation": True})
+    label = {"backend": "sandbox_fusion", "test_cases": {"inputs": ["1"], "outputs": ["2"]}}
+    records = asyncio.run(generate_group("q", label, params, 128, Tokenizer(), Engine(["no code"]), 1))
+    assert records[0]["reward"] == 0.
+
+
+@pytest.mark.parametrize("cases", [
+    {},
+    {
+        "inputs": [],
+        "outputs": []
+    },
+    {
+        "inputs": ["1"],
+        "outputs": []
+    },
+    {
+        "inputs": "1",
+        "outputs": ["2"]
+    },
+    {
+        "assert_case": "assert True"
+    },
+])
+def test_code_eval_rejects_empty_or_mismatched_test_cases(monkeypatch, cases):
+    monkeypatch.setitem(sys.modules, "verl.utils.reward_score.sandbox_fusion",
+                        NS(compute_score=lambda **kwargs: pytest.fail("Invalid cases reached the scorer")))
+    cfg = {**DEFAULTS, "sandbox_fusion_url": "http://sandbox"}
+    params = SamplingParams(extra_args={"bifocal": cfg, "bifocal_evaluation": True})
+    with pytest.raises(ValueError):
+        asyncio.run(
+            generate_group("q", {
+                "backend": "sandbox_fusion",
+                "test_cases": cases
+            }, params, 128, Tokenizer(), Engine(["```python\npass\n```"]), 1))
+
+
+def test_code_eval_requires_endpoint_but_code_labels_are_ignored_in_training():
+    label = {"backend": "sandbox_fusion", "test_cases": {"inputs": ["1"], "outputs": ["2"]}}
+    params = SamplingParams(extra_args={"bifocal": DEFAULTS, "bifocal_evaluation": True})
+    with pytest.raises(ValueError, match="sandbox_fusion_url"):
+        asyncio.run(generate_group("q", label, params, 128, Tokenizer(), Engine(["code"]), 1))
+    params.extra_args["bifocal_evaluation"] = False
+    records = asyncio.run(generate_group("q", label, params, 128, Tokenizer(), Engine([r"\boxed{1}"]), 1))
+    assert records[0]["reward"] == 1.
+    assert "code_test_pass_rate" not in records[0]["extra_logs"]
 
 
 def test_covo_scores_current_engine_prefixes(monkeypatch):
@@ -127,8 +270,7 @@ def test_prism_uses_real_provider_probabilities(monkeypatch):
     cfg = {**DEFAULTS, "method": "prism", "prm_function": "bifocal_test_prm.score"}
     engine = Engine([r"\boxed{1}", r"\boxed{2}"])
     output = asyncio.run(
-        generate_group("q", "unused", SamplingParams(extra_args={"bifocal": cfg}), 128, Tokenizer(), engine, 2)
-    )
+        generate_group("q", "unused", SamplingParams(extra_args={"bifocal": cfg}), 128, Tokenizer(), engine, 2))
     assert [r["reward"] for r in output] == pytest.approx([0.5333333333] * 2)
 
 
@@ -149,15 +291,12 @@ def test_rollout_records_survive_native_experience_padding_and_batching(method):
     engine = Engine([root] + [r"\boxed{2}"] * 4)
     cfg = {**DEFAULTS, "method": method, "tree_roots": 1, "tree_forks": 2, "tree_branches": 2}
     records = asyncio.run(
-        generate_group("q", "unused", SamplingParams(extra_args={"bifocal": cfg}), 128, Tokenizer(), engine, 5)
-    )
+        generate_group("q", "unused", SamplingParams(extra_args={"bifocal": cfg}), 128, Tokenizer(), engine, 5))
     path = Path(__file__).resolve().parents[2] / "openrlhf/trainer/ppo_utils/samples_generator.py"
-    cls = next(
-        n for n in ast.parse(path.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "SamplesGenerator"
-    )
-    function = next(
-        n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_process_response_into_experience"
-    )
+    cls = next(n for n in ast.parse(path.read_text()).body
+               if isinstance(n, ast.ClassDef) and n.name == "SamplesGenerator")
+    function = next(n for n in cls.body
+                    if isinstance(n, ast.FunctionDef) and n.name == "_process_response_into_experience")
     namespace = {"torch": torch, "Experience": Experience}
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(path), "exec"), namespace)  # noqa: S102
     samples = [namespace[function.name](None, r, max_len=128) for r in records]

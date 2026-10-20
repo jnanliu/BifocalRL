@@ -1,0 +1,8 @@
+{
+  "dataset": ["data/math500.jsonl", "data/gsm8k.jsonl"],
+  "split": "train",
+  "steps": 10,
+  "temperature": 0,
+  "n_samples_per_prompt": 1,
+  "label_key": "label"
+}

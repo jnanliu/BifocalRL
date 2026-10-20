@@ -78,6 +78,7 @@ setup(
         "vllm_latest": ["vllm>=0.29.0"],
         "ring": ["ring_flash_attn"],
         "liger": ["liger_kernel"],
+        "code_eval": ["verl"],
     },
     python_requires=">=3.10",
     classifiers=[

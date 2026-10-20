@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
 
 class _Pbar:
@@ -60,6 +61,54 @@ class _Loader:
 
     def state_dict(self):
         return {"done": True}
+
+
+@pytest.mark.parametrize("n", [1, 2])
+def test_eval_reports_binary_program_passes_separately_from_test_pass_rates(ppo_module, n):
+    loader = [(["math", "code"], ["math question", "code question"], ["1", "tests"], [None, None])]
+    samples = []
+    for prompt, rewards, fractions in (
+        ("math question", [1., 0.], [None, None]),
+        ("code question", [0., 1.], [0.5, 1.]),
+    ):
+        for reward, fraction in zip(rewards[:n], fractions[:n]):
+            samples.append(SimpleNamespace(
+                prompts=[prompt], rewards=torch.tensor([reward]), response_length=torch.tensor([10]),
+                truncated=torch.tensor([False]), info={} if fraction is None else {
+                    "code_test_pass_rate": torch.tensor([fraction])
+                },
+            ))
+    logs = ppo_module.compute_eval_metrics(loader, samples, n)
+    assert logs["eval_math_pass1"] == (1. if n == 1 else 0.5)
+    assert logs["eval_code_pass1"] == (0. if n == 1 else 0.5)
+    assert logs[f"eval_code_pass{n}"] == (0. if n == 1 else 1.)
+    assert logs["eval_code_test_pass_rate"] == (0.5 if n == 1 else 0.75)
+    assert "eval_math_test_pass_rate" not in logs
+
+
+@pytest.mark.parametrize("incomplete", [False, True])
+def test_eval_variable_groups_use_prompt_ids_even_when_text_is_duplicated(ppo_module, incomplete):
+    loader = [(["math500", "livecodebench"], ["same prompt", "same prompt"], ["1", "tests"], [None, None])]
+    samples = []
+    for index, count, rewards in ((0, 1, [0.]), (1, 3, [1., 0., 0.])):
+        for reward in rewards:
+            samples.append(SimpleNamespace(
+                prompts=["same prompt"], rewards=torch.tensor([reward]),
+                response_length=torch.tensor([10]), truncated=torch.tensor([False]),
+                info={"eval_prompt_index": torch.tensor([index]), "eval_n_samples_per_prompt": torch.tensor([count])},
+            ))
+    samples = [samples[i] for i in [1, 0, 3, 2]]
+    if incomplete:
+        with pytest.raises(ValueError, match="Incomplete evaluation group"):
+            ppo_module.compute_eval_metrics(loader, samples[:-1], 1)
+        return
+    logs = ppo_module.compute_eval_metrics(loader, samples, 1)
+    assert logs["eval_math500_pass1"] == 0.
+    assert logs["eval_livecodebench_pass1"] == pytest.approx(1 / 3)
+    assert logs["eval_livecodebench_pass3"] == 1.
+    assert logs["eval_math500_n_samples_per_prompt"] == 1.
+    assert logs["eval_livecodebench_n_samples_per_prompt"] == 3.
+    assert logs["eval_num_samples"] == 4.
 
 
 class _Generator:

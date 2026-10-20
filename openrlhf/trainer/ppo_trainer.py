@@ -60,10 +60,11 @@ def prepare_datasets(strategy, tokenizer):
         eval_data = eval_data.select(range(min(args.data.max_samples, len(eval_data))))
         eval_strategy = strategy
         cfg = getattr(getattr(args, "bifocal", None), "settings", None)
-        if cfg:
+        label_key = getattr(args.eval, "label_key", None)
+        if label_key is not None or cfg:
             eval_strategy = copy(strategy)
             eval_strategy.args = deepcopy(args)
-            eval_strategy.args.data.label_key = cfg["eval_label_key"]
+            eval_strategy.args.data.label_key = label_key if label_key is not None else cfg["eval_label_key"]
         eval_dataset = PromptDataset(eval_data, tokenizer, eval_strategy, input_template=args.data.input_template)
         eval_dataloader = strategy.setup_dataloader(
             eval_dataset,
@@ -87,55 +88,79 @@ def prepare_datasets(strategy, tokenizer):
 
 
 def compute_eval_metrics(eval_dataloader, samples_list, n_samples_per_prompt):
-    """Compute pass@k eval metrics from generated samples.
+    """Compute per-datasource metrics with explicit, potentially unequal prompt groups.
 
     Shared by both sync and async evaluation paths.
     """
     if not samples_list:
         return {}
+    if type(n_samples_per_prompt) is not int or n_samples_per_prompt < 1:
+        raise ValueError("Evaluation n_samples_per_prompt must be a positive integer")
 
     prompt_to_datasource = {}
+    ordered_prompts = []
     for datasources, prompts, labels, _images in eval_dataloader:
         for prompt, datasource in zip(prompts, datasources):
             prompt_to_datasource[prompt] = datasource
+            ordered_prompts.append((datasource, prompt))
 
-    # Single pass: collect prompts, rewards, response_length, truncated
-    all_prompts = []
-    all_rewards = []
-    all_response_lengths = []
-    all_truncated = []
-    for s in samples_list:
-        all_prompts.extend(s.prompts)
-        all_rewards.append(s.rewards)
-        all_response_lengths.append(s.response_length.item() if s.response_length is not None else None)
-        all_truncated.append(s.truncated.item() if s.truncated is not None else None)
-
-    rewards = torch.tensor(all_rewards).reshape(-1, n_samples_per_prompt)
+    groups = {}
+    tagged = "eval_prompt_index" in samples_list[0].info
+    for i, sample in enumerate(samples_list):
+        if ("eval_prompt_index" in sample.info) != tagged:
+            raise ValueError("Evaluation samples mix tagged and untagged prompt groups")
+        if tagged:
+            group_id = int(sample.info["eval_prompt_index"].item())
+            count = int(sample.info["eval_n_samples_per_prompt"].item())
+            if not 0 <= group_id < len(ordered_prompts):
+                raise ValueError("Evaluation prompt index is outside the dataloader")
+            ds, prompt = ordered_prompts[group_id]
+            if sample.prompts != [prompt]:
+                raise ValueError("Evaluation prompt index does not match its generated prompt")
+        else:
+            # Retain compatibility with callers supplying uniform, untagged samples.
+            count = n_samples_per_prompt
+            group_id = i // count
+            ds = prompt_to_datasource.get(sample.prompts[0], "unknown")
+        group = groups.setdefault(group_id, {"datasource": ds, "count": count, "samples": []})
+        if count < 1 or count != group["count"] or ds != group["datasource"]:
+            raise ValueError("Inconsistent evaluation prompt group metadata")
+        group["samples"].append(sample)
 
     metrics = {}
-    for i in range(len(all_prompts) // n_samples_per_prompt):
-        ds = prompt_to_datasource.get(all_prompts[i * n_samples_per_prompt], "unknown")
+    for group in groups.values():
+        ds, count, samples = group["datasource"], group["count"], group["samples"]
+        if len(samples) != count:
+            raise ValueError(f"Incomplete evaluation group: got {len(samples)} samples, expected {count}")
         if ds not in metrics:
-            metrics[ds] = {f"pass{n_samples_per_prompt}": 0, "pass1": 0, "count": 0, "lengths": [], "truncated": []}
-        chunk = rewards[i]
-        if n_samples_per_prompt > 1:
-            metrics[ds][f"pass{n_samples_per_prompt}"] += chunk.max().float().item()
-        metrics[ds]["pass1"] += chunk.mean().float().item()
-        metrics[ds]["count"] += 1
-
-        start = i * n_samples_per_prompt
-        for j in range(start, start + n_samples_per_prompt):
-            if all_response_lengths[j] is not None:
-                metrics[ds]["lengths"].append(all_response_lengths[j])
-            if all_truncated[j] is not None:
-                metrics[ds]["truncated"].append(all_truncated[j])
+            metrics[ds] = {
+                "n_samples": count, "passk": 0, "pass1": 0, "count": 0,
+                "lengths": [], "truncated": [], "test_pass_rates": [],
+            }
+        m = metrics[ds]
+        if m["n_samples"] != count:
+            raise ValueError(f"Datasource {ds!r} uses inconsistent evaluation sample counts")
+        rewards = torch.tensor([s.rewards.item() for s in samples])
+        m["passk"] += rewards.max().float().item()
+        m["pass1"] += rewards.mean().float().item()
+        m["count"] += 1
+        for sample in samples:
+            if sample.response_length is not None:
+                m["lengths"].append(sample.response_length.item())
+            if sample.truncated is not None:
+                m["truncated"].append(sample.truncated.item())
+            if "code_test_pass_rate" in sample.info:
+                m["test_pass_rates"].append(sample.info["code_test_pass_rate"].item())
 
     logs = {}
     total_lengths = []
     total_truncated = []
     for ds, m in metrics.items():
-        logs[f"eval_{ds}_pass{n_samples_per_prompt}"] = m[f"pass{n_samples_per_prompt}"] / m["count"]
+        logs[f"eval_{ds}_pass{m['n_samples']}"] = m["passk"] / m["count"]
         logs[f"eval_{ds}_pass1"] = m["pass1"] / m["count"]
+        logs[f"eval_{ds}_n_samples_per_prompt"] = float(m["n_samples"])
+        if m["test_pass_rates"]:
+            logs[f"eval_{ds}_test_pass_rate"] = sum(m["test_pass_rates"]) / len(m["test_pass_rates"])
         if m["lengths"]:
             logs[f"eval_{ds}_response_length_mean"] = sum(m["lengths"]) / len(m["lengths"])
             total_lengths.extend(m["lengths"])
@@ -147,7 +172,7 @@ def compute_eval_metrics(eval_dataloader, samples_list, n_samples_per_prompt):
         logs["eval_response_length_mean"] = sum(total_lengths) / len(total_lengths)
     if total_truncated:
         logs["eval_truncated_rate"] = sum(total_truncated) / len(total_truncated)
-    logs["eval_num_samples"] = float(len(all_prompts))
+    logs["eval_num_samples"] = float(len(samples_list))
 
     return logs
 

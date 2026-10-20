@@ -42,6 +42,9 @@ DEFAULTS = {
     "score_concurrency": 16,
     "voting_seed": 42,
     "eval_label_key": "label",
+    "sandbox_fusion_url": None,
+    "sandbox_timeout": 10,
+    "sandbox_memory_limit_mb": 1024,
 }
 
 
@@ -51,6 +54,10 @@ def add_arguments(parser):
     group.add_argument("--bifocal.method", type=str.lower, choices=METHODS)
     group.add_argument("--bifocal.prm_url", help="Independent GenPRM SGLang endpoint")
     group.add_argument("--bifocal.prm_model", help="PRM tokenizer path matching the endpoint")
+    group.add_argument(
+        "--bifocal.sandbox_fusion_url", "--eval.sandbox_fusion_url", dest="eval.sandbox_fusion_url",
+        help="Sandbox Fusion /run_code endpoint for code evaluation",
+    )
 
 
 def configure(args):
@@ -63,9 +70,12 @@ def configure(args):
         raise ValueError(f"Unknown BifocalRL settings: {sorted(data.keys() - cfg.keys())}")
     cfg.update(data)
     cfg["mixed"] = {**DEFAULTS["mixed"], **data.get("mixed", {})}
-    for key in ("method", "prm_url", "prm_model"):
+    for key in ("method", "prm_url", "prm_model", "sandbox_fusion_url"):
         if getattr(args.bifocal, key, None) is not None:
             cfg[key] = getattr(args.bifocal, key)
+    eval_url = getattr(getattr(args, "eval", None), "sandbox_fusion_url", None)
+    if eval_url is not None:
+        cfg["sandbox_fusion_url"] = eval_url
     cfg["method"] = cfg["method"].lower()
     if cfg["method"] not in METHODS:
         raise ValueError(f"Unknown BifocalRL method: {cfg['method']}")
@@ -75,6 +85,10 @@ def configure(args):
             raise ValueError(f"Method {cfg['method']} requires mixed.alpha_mode={mode!r}")
         cfg["mixed"]["alpha_mode"] = mode
     MixedRewardConfig(**cfg["mixed"])
+    if not math.isfinite(cfg["sandbox_timeout"]) or cfg["sandbox_timeout"] <= 0:
+        raise ValueError("sandbox_timeout must be finite and positive")
+    if not isinstance(cfg["sandbox_memory_limit_mb"], int) or cfg["sandbox_memory_limit_mb"] < 1:
+        raise ValueError("sandbox_memory_limit_mb must be a positive integer")
     if args.rollout.n_samples_per_prompt < 2 or args.vllm.num_engines < 1:
         raise ValueError("BifocalRL requires vLLM and at least two responses per prompt")
     if args.train.async_enable or args.train.agent_func_path or args.data.max_images_per_prompt:

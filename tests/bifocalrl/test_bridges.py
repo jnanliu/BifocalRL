@@ -73,7 +73,8 @@ def test_actor_stats_do_not_run_during_policy_gradient():
     assert table.grad is not None and table.grad.abs().sum() > 0
 
 
-def test_eval_can_load_labels_without_requiring_training_labels():
+@pytest.mark.parametrize("label_key,expected", [(None, "label"), ("answer", "answer")])
+def test_eval_can_load_labels_without_requiring_training_labels(label_key, expected):
     root = Path(__file__).resolve().parents[2]
     path = root / "openrlhf/trainer/ppo_trainer.py"
     function = next(
@@ -109,12 +110,12 @@ def test_eval_can_load_labels_without_requiring_training_labels():
             input_template=None,
             dataloader_num_workers=0,
         ),
-        eval=NS(dataset="eval", split="train"),
+        eval=NS(dataset="eval", split="train", label_key=label_key),
         train=NS(seed=42, batch_size=8, num_episodes=1, max_epochs=1),
         rollout=NS(n_samples_per_prompt=4),
         bifocal=NS(settings={"eval_label_key": "label"}),
     )
     strategy = NS(args=args, setup_dataloader=lambda dataset, *a, **kw: dataset)
     namespace["prepare_datasets"](strategy, None)
-    assert seen == [None, "label"]
+    assert seen == [None, expected]
     assert args.data.label_key is None

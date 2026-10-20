@@ -1,4 +1,5 @@
 import heapq
+import json
 from typing import List, Optional, Tuple
 
 import ray
@@ -20,13 +21,14 @@ def _collect_prompt_batch(dataloader_iter, num_prompts: int):
     collecting the returned prompts. Callers should still process any partial
     batch that was collected before exhaustion.
     """
-    prompts, labels, images = [], [], []
+    datasources, prompts, labels, images = [], [], [], []
     exhausted = False
 
     while len(prompts) < num_prompts:
         try:
-            _, batch_prompts, batch_labels, batch_images = next(dataloader_iter)
+            batch_datasources, batch_prompts, batch_labels, batch_images = next(dataloader_iter)
             remaining = num_prompts - len(prompts)
+            datasources.extend(batch_datasources[:remaining])
             prompts.extend(batch_prompts[:remaining])
             labels.extend(batch_labels[:remaining])
             images.extend(batch_images[:remaining])
@@ -34,7 +36,7 @@ def _collect_prompt_batch(dataloader_iter, num_prompts: int):
             exhausted = True
             break
 
-    return prompts, labels, images, exhausted
+    return datasources, prompts, labels, images, exhausted
 
 
 class SamplesGenerator:
@@ -56,12 +58,25 @@ class SamplesGenerator:
 
         self.prompts_dataloader = prompts_dataloader
         self.eval_dataloader = eval_dataloader
+        eval_args = getattr(self.args, "eval", None)
+        overrides = getattr(eval_args, "n_samples_per_prompt_by_datasource", None)
+        self.eval_sample_counts = json.loads(overrides) if overrides else {}
+        if not isinstance(self.eval_sample_counts, dict) or any(
+            type(n) is not int or n < 1 for n in self.eval_sample_counts.values()
+        ):
+            raise ValueError("eval.n_samples_per_prompt_by_datasource must map datasource names to positive integers")
+        default_n = getattr(eval_args, "n_samples_per_prompt", 1)
+        if type(default_n) is not int or default_n < 1:
+            raise ValueError("eval.n_samples_per_prompt must be a positive integer")
 
     @torch.no_grad()
     def generate_eval_samples(self, **generate_kwargs) -> List[Experience]:
         """Generate evaluation samples for the entire eval dataloader."""
         if getattr(getattr(self.args, "bifocal", None), "settings", None):
             generate_kwargs["bifocal_evaluation"] = True
+        generate_kwargs["is_evaluation"] = True
+        generate_kwargs.setdefault("n_samples_per_prompt", self.args.eval.n_samples_per_prompt)
+        self._eval_prompt_offset = 0
         if getattr(self, "_eval_dataloader_iter", None) is None:
             self._eval_dataloader_iter = iter(self.eval_dataloader)
 
@@ -150,12 +165,22 @@ class SamplesGenerator:
         prompts_consumed = 0
         accepted_experiences: List[Experience] = []
 
-        prompts, labels, images, exhausted = _collect_prompt_batch(dataloader_iter, num_prompts)
+        datasources, prompts, labels, images, exhausted = _collect_prompt_batch(dataloader_iter, num_prompts)
         if not prompts:
             return [], prompts_consumed, True
 
         target_num_prompts = len(prompts)
-        pending_refs = self._dispatch_prompts_to_vllm(prompts, labels, images=images, **generate_kwargs)
+        pending_refs = self._dispatch_prompts_to_vllm(
+            prompts, labels, images=images, datasources=datasources, **generate_kwargs
+        )
+        eval_groups = {}
+        if generate_kwargs.get("is_evaluation"):
+            default_n = generate_kwargs["n_samples_per_prompt"]
+            eval_groups = {
+                ref: (self._eval_prompt_offset + i, self.eval_sample_counts.get(ds, default_n))
+                for i, (ref, ds) in enumerate(zip(pending_refs, datasources, strict=True))
+            }
+            self._eval_prompt_offset += len(prompts)
         prompts_consumed += target_num_prompts
 
         pbar = tqdm(range(target_num_prompts), desc="Generate samples")
@@ -166,6 +191,15 @@ class SamplesGenerator:
                 experiences = [
                     self._process_response_into_experience(response, **generate_kwargs) for response in ray.get(ref)
                 ]
+                if generate_kwargs.get("is_evaluation"):
+                    prompt_index, count = eval_groups[ref]
+                    if len(experiences) != count:
+                        raise ValueError(
+                            f"Evaluation prompt {prompt_index} returned {len(experiences)} samples; expected {count}"
+                        )
+                    for experience in experiences:
+                        experience.info["eval_prompt_index"] = torch.tensor([prompt_index])
+                        experience.info["eval_n_samples_per_prompt"] = torch.tensor([count])
 
                 # Drop experiences if the average score falls outside the allowed range.
                 if dynamic_filtering and all(e.scores is not None for e in experiences):
@@ -184,18 +218,20 @@ class SamplesGenerator:
                     pbar.update()
                 elif dynamic_filtering:
                     # Dispatch replacement for filtered prompt.
-                    new_prompts, new_labels, new_images, exhausted = _collect_prompt_batch(dataloader_iter, 1)
+                    new_datasources, new_prompts, new_labels, new_images, exhausted = _collect_prompt_batch(
+                        dataloader_iter, 1
+                    )
                     prompts_consumed += len(new_prompts)
                     if new_prompts:
                         new_refs = self._dispatch_prompts_to_vllm(
-                            new_prompts, new_labels, images=new_images, **generate_kwargs
+                            new_prompts, new_labels, images=new_images, datasources=new_datasources, **generate_kwargs
                         )
                         pending_refs.extend(new_refs)
 
         return accepted_experiences, prompts_consumed, exhausted
 
     def _dispatch_prompts_to_vllm(
-        self, prompts: List[str], labels: List[str], *, images: List = None, **generate_kwargs
+        self, prompts: List[str], labels: List[str], *, images: List = None, datasources: List = None, **generate_kwargs
     ) -> List:
         """Send prompts to rollout executors and return Ray object refs."""
         sampling_params = SamplingParams(
@@ -209,12 +245,22 @@ class SamplesGenerator:
         )
         cfg = getattr(getattr(self.args, "bifocal", None), "settings", None)
         if cfg:
+            if generate_kwargs.get("is_evaluation"):
+                cfg = dict(cfg)
+                for key in ("sandbox_fusion_url", "sandbox_timeout", "sandbox_memory_limit_mb", "sandbox_concurrency"):
+                    value = getattr(self.args.eval, key, None)
+                    if value is not None:
+                        cfg["score_concurrency" if key == "sandbox_concurrency" else key] = value
             sampling_params.extra_args = {
                 "bifocal": cfg,
                 "bifocal_evaluation": generate_kwargs.get("bifocal_evaluation", False),
             }
         truncate_length = generate_kwargs.get("max_len", 2048)
         n_samples = generate_kwargs.get("n_samples_per_prompt", self.args.rollout.n_samples_per_prompt)
+        sample_counts = [
+            self.eval_sample_counts.get(ds, n_samples) if generate_kwargs.get("is_evaluation") else n_samples
+            for ds in (datasources if datasources is not None else ["default"] * len(prompts))
+        ]
 
         # Snapshot current pending rollout counts to balance upcoming work.
         pending_counts = ray.get([engine.get_num_unfinished_requests.remote() for engine in self.vllm_engines])
@@ -223,10 +269,10 @@ class SamplesGenerator:
 
         # Pre-compute engine assignment to keep loads even.
         engine_indices = []
-        for _ in prompts:
+        for count in sample_counts:
             current_load, engine_idx = heapq.heappop(engine_heap)
             engine_indices.append(engine_idx)
-            heapq.heappush(engine_heap, (current_load + n_samples, engine_idx))
+            heapq.heappush(engine_heap, (current_load + count, engine_idx))
 
         if images is None:
             images = [None] * len(prompts)
@@ -241,7 +287,7 @@ class SamplesGenerator:
                 sampling_params=sampling_params,
                 max_length=truncate_length,
                 hf_tokenizer=self.tokenizer,
-                num_samples=n_samples,
+                num_samples=sample_counts[idx],
                 images=img,
             )
             refs.append(ref)

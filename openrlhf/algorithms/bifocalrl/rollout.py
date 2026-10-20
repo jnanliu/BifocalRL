@@ -3,9 +3,11 @@
 import asyncio
 import hashlib
 import importlib
+import json
 import math
 import random
 import re
+import threading
 from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
@@ -13,6 +15,8 @@ from types import SimpleNamespace
 
 from .methods import covo_curiosity, covo_features, covo_rewards, prism_reward
 from .voting import cluster_voting_rewards, extract_answers, is_math_equivalent, weighted_majority_voting
+
+_SANDBOX_SEMAPHORES = {}
 
 
 async def score_continuation(engine, prefix, continuation):
@@ -188,9 +192,78 @@ async def generate_group(prompt, label, sampling_params, max_length, tokenizer, 
     if evaluation:
         from .legacy.math import grade
 
-        ground_truth = str(label).split("####")[-1].strip()
-        ground_truth = extract_answers([ground_truth])[0] or ground_truth
-        rewards = [float(answer is not None and grade(answer, ground_truth, fast=True)) for answer in answers]
+        specification = label
+        if isinstance(label, str):
+            try:
+                specification = json.loads(label)
+            except json.JSONDecodeError:
+                pass
+        backend = specification.get("backend", "math") if isinstance(specification, dict) else "math"
+        if backend == "sandbox_fusion":
+            if not cfg["sandbox_fusion_url"]:
+                raise ValueError("Code evaluation requires --bifocal.sandbox_fusion_url or sandbox_fusion_url in JSON")
+            try:
+                from verl.utils.reward_score.sandbox_fusion import compute_score
+            except ImportError as exc:
+                raise ImportError("Code evaluation requires VERL with verl.utils.reward_score.sandbox_fusion") from exc
+            cases = specification["test_cases"]
+            cases = json.loads(cases) if isinstance(cases, str) else deepcopy(cases)
+            if not isinstance(cases, dict):
+                raise ValueError("Code test_cases must be a dictionary or JSON object")
+            if "assert_case" in cases:
+                if not isinstance(cases["assert_case"], list):
+                    raise ValueError("assert_case must be a list of Python assertions")
+                cases.setdefault("inputs", [""] * len(cases["assert_case"]))
+                cases.setdefault("outputs", [None] * len(cases["assert_case"]))
+            inputs, outputs = cases.get("inputs"), cases.get("outputs")
+            if (
+                not isinstance(inputs, list)
+                or not inputs
+                or not isinstance(outputs, list)
+                or len(inputs) != len(outputs)
+                or ("assert_case" in cases and len(cases["assert_case"]) != len(inputs))
+            ):
+                raise ValueError("Code evaluation needs nonempty, equally sized inputs/outputs/assert_case lists")
+            url = cfg["sandbox_fusion_url"].rstrip("/")
+            if not url.endswith("/run_code"):
+                url += "/run_code"
+            # Shared across prompt groups in this worker; VERL runs test cases in threads.
+            semaphore = _SANDBOX_SEMAPHORES.setdefault(
+                cfg["score_concurrency"], threading.BoundedSemaphore(cfg["score_concurrency"])
+            )
+            rewards = []
+            for response in responses:
+                fraction, execution = await asyncio.to_thread(
+                    compute_score,
+                    sandbox_fusion_url=url,
+                    concurrent_semaphore=semaphore,
+                    memory_limit_mb=cfg["sandbox_memory_limit_mb"],
+                    completion=response["response_text"],
+                    test_cases=deepcopy(cases),
+                    continuous=False,
+                    timeout=cfg["sandbox_timeout"],
+                )
+                if not math.isfinite(fraction) or not 0 <= fraction <= 1 or not execution:
+                    raise RuntimeError("Sandbox Fusion returned an invalid score or missing execution metadata")
+                for case in execution:
+                    # Infrastructure/data errors must not masquerade as an incorrect program.
+                    error = case.get("error", "")
+                    if (
+                        case.get("api_request_error")
+                        or case.get("status") in ("api_error", "sandbox_error", "internal_error")
+                        or str(case.get("status", "")).startswith(("unknown", "unexpected"))
+                        or (error and not error.startswith("Invalid completion"))
+                    ):
+                        raise RuntimeError(f"Sandbox Fusion evaluation failed: {case}")
+                # VERL returns a fraction; pass@k requires binary all-tests-passed rewards.
+                rewards.append(float(fraction == 1.0))
+                response["extra_logs"].update(code_test_pass_rate=float(fraction), code_num_tests=len(inputs))
+        elif backend == "math":
+            ground_truth = str(label).split("####")[-1].strip()
+            ground_truth = extract_answers([ground_truth])[0] or ground_truth
+            rewards = [float(answer is not None and grade(answer, ground_truth, fast=True)) for answer in answers]
+        else:
+            raise ValueError(f"Unknown evaluation backend: {backend}")
     elif cfg["method"] == "covo":
         rewards = await score_covo(cfg, responses, tokenizer, engine)
     elif cfg["method"] == "prism":

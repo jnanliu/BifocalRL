@@ -9,36 +9,18 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TOKENIZERS_PARALLELISM=false \
     VLLM_WORKER_MULTIPROC_METHOD=spawn \
     HF_HUB_CACHE=/project/huggingface \
-    HF_HUB_OFFLINE=1 \
-    UV_BREAK_SYSTEM_PACKAGES=1 \
-    UV_LINK_MODE=copy \
-    UV_PYTHON_INSTALL_DIR=/opt/uv-python \
-    CC=/usr/bin/gcc \
-    CXX=/usr/bin/g++ \
-    CUDA_HOME=/usr/local/cuda \
-    CUDACXX=/usr/local/cuda/bin/nvcc \
-    TRINITY_HOME=/opt/trinity-venv \
-    PATH=/opt/trinity-venv/bin:${PATH}
+    HF_HUB_OFFLINE=1
 
-# Install only utilities not guaranteed by the NGC vLLM image. apt cache
-# mounts speed up retries without becoming part of the resulting image.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update -qq \
+RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends \
         ca-certificates \
         build-essential \
-        cuda-nvcc-13-0 \
         ffmpeg \
         git \
         git-lfs \
         mesa-utils \
         openjdk-17-jdk-headless \
-        python3 \
-        python3-dev \
-        python3-pip \
         python3-venv \
-        python-is-python3 \
         tmux \
         vim \
         xvfb \
@@ -46,10 +28,55 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         > /dev/null \
     && chmod u-s,g-s /usr/lib/*-linux-gnu/utempter/utempter
 
+ENV SANDBOXFUSION_HOME=/opt/SandboxFusion \
+    SANDBOXFUSION_RUNTIME_PATH=/opt/sandboxfusion-runtime \
+    SANDBOXFUSION_PYTHON=/opt/sandboxfusion-runtime/bin/python \
+    SANDBOXFUSION_WORK_DIR=/mnt/sandboxfusion
+
+COPY sandboxfusion-runtime-requirements.txt \
+    /tmp/sandboxfusion-runtime-requirements.txt
+COPY sandboxfusion-uv-runtime.patch \
+    /tmp/sandboxfusion-uv-runtime.patch
+
+RUN git clone --depth=1 https://github.com/bytedance/SandboxFusion.git \
+        "$SANDBOXFUSION_HOME" \
+    && git -C "$SANDBOXFUSION_HOME" apply \
+        /tmp/sandboxfusion-uv-runtime.patch \
+    && rm /tmp/sandboxfusion-uv-runtime.patch \
+    && mkdir -p \
+        "$SANDBOXFUSION_HOME/docs/build" \
+        "$SANDBOXFUSION_WORK_DIR" \
+    && chmod -R a+rX "$SANDBOXFUSION_HOME" \
+    && chmod 1777 "$SANDBOXFUSION_WORK_DIR"
+
+# Keep SandboxFusion's dependencies separate from the training environment.
+# NVIDIA's pip constraints apply to the training environment only.
+RUN python -m venv "$SANDBOXFUSION_RUNTIME_PATH" \
+    && PIP_CONSTRAINT= PIP_BUILD_CONSTRAINT= "$SANDBOXFUSION_PYTHON" -m pip install \
+        torch --index-url https://download.pytorch.org/whl/cpu \
+    && PIP_CONSTRAINT= PIP_BUILD_CONSTRAINT= "$SANDBOXFUSION_PYTHON" -m pip install \
+        --requirements /tmp/sandboxfusion-runtime-requirements.txt \
+        --editable "$SANDBOXFUSION_HOME" \
+    && "$SANDBOXFUSION_PYTHON" -m pip check \
+    && rm /tmp/sandboxfusion-runtime-requirements.txt \
+    && chmod -R a+rX "$SANDBOXFUSION_HOME"
+
+RUN "$SANDBOXFUSION_PYTHON" -c \
+        'import nltk; nltk.download("punkt"); nltk.download("stopwords")' \
+    && "$SANDBOXFUSION_PYTHON" -c \
+        'import numpy, pandas, sandbox, scipy, sklearn, torch, uvicorn; print("SandboxFusion isolated runtime OK")' \
+    && printf '%s\n' \
+        '#!/bin/sh' \
+        'export TMPDIR="${SANDBOXFUSION_WORK_DIR:-/mnt/sandboxfusion}"' \
+        'cd "$SANDBOXFUSION_HOME" || exit 1' \
+        'exec "$SANDBOXFUSION_PYTHON" -m uvicorn sandbox.server.server:app --host "${HOST:-127.0.0.1}" --port "${_BYTEFAAS_RUNTIME_PORT:-8080}" "$@"' \
+        > /usr/local/bin/sandboxfusion-server \
+    && chmod 755 /usr/local/bin/sandboxfusion-server
+
 WORKDIR /home/jliu0514/projects/BifocalRL
 
 COPY . .
 
-RUN pip install -e .[vllm]
+RUN python -m pip install -e '.[vllm,code_eval]'
 
 CMD ["sleep", "infinity"]
