@@ -1,0 +1,13 @@
+# This file is managed by the MAVERIC platform. Do not modify — changes will be overwritten on the next provisioning run.
+name: "MAVERIC: Build ARM64"
+on:
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  build-arm64:
+    uses: Monash-MAVERIC/maveric-common/.github/workflows/maveric-build.yaml@main
+    with:
+      action: build-arm64
+    secrets: inherit

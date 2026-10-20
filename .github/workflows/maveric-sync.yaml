@@ -1,0 +1,13 @@
+# This file is managed by the MAVERIC platform. Do not modify — changes will be overwritten on the next provisioning run.
+name: "MAVERIC: Sync"
+on:
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  sync:
+    uses: Monash-MAVERIC/maveric-common/.github/workflows/maveric-run.yaml@main
+    with:
+      action: sync
+    secrets: inherit
