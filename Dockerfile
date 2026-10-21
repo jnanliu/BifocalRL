@@ -79,10 +79,28 @@ RUN unset LD_LIBRARY_PATH LD_PRELOAD PYTHONPATH PYTHONHOME \
 
 WORKDIR /home/jliu0514/projects/BifocalRL
 
+COPY requirements.txt /tmp/openrlhf-requirements.txt
+
+# Install vLLM's PyTorch before compiling extensions, then keep that version.
+RUN python -m pip install --no-build-isolation \
+        -c /tmp/openrlhf-requirements.txt 'vllm==0.29.0' \
+    && python -c 'from importlib.metadata import version; print("torch==" + version("torch"))' \
+        > /tmp/openrlhf-torch-constraints.txt
+
+RUN python -m pip install -c /tmp/openrlhf-torch-constraints.txt 'ray[default]==2.55.0'
+RUN python -m pip install --no-build-isolation \
+        -c /tmp/openrlhf-torch-constraints.txt 'deepspeed==0.19.6'
+RUN MAX_JOBS=2 NVCC_THREADS=1 python -m pip install --no-build-isolation \
+        -c /tmp/openrlhf-torch-constraints.txt 'flash-attn==2.8.3'
+
+RUN python -m pip install --no-build-isolation \
+        -c /tmp/openrlhf-torch-constraints.txt -r /tmp/openrlhf-requirements.txt
+RUN python -m pip install --no-build-isolation \
+        -c /tmp/openrlhf-torch-constraints.txt -c /tmp/openrlhf-requirements.txt verl
+
 COPY . .
 
-# FlashAttention's build imports torch, which is provided by the NGC image.
-# Disable build isolation so the build can access that installation.
-RUN python -m pip install --no-build-isolation -e '.[vllm,code_eval]'
+RUN python -m pip install --no-build-isolation \
+        -c /tmp/openrlhf-torch-constraints.txt -e '.[vllm,code_eval]'
 
 CMD ["sleep", "infinity"]
