@@ -81,9 +81,12 @@ WORKDIR /home/jliu0514/projects/BifocalRL
 
 COPY requirements.txt /tmp/openrlhf-requirements.txt
 
+# Constraints only pin versions; install extras through the requirements file.
+RUN sed -E 's/\[[^]]+\]//g' /tmp/openrlhf-requirements.txt > /tmp/openrlhf-constraints.txt
+
 # Install vLLM's PyTorch before compiling extensions, then keep that version.
 RUN python -m pip install --no-build-isolation \
-        -c /tmp/openrlhf-requirements.txt 'vllm==0.29.0' \
+        -c /tmp/openrlhf-constraints.txt 'vllm==0.29.0' \
     && python -c 'from importlib.metadata import version; print("torch==" + version("torch"))' \
         > /tmp/openrlhf-torch-constraints.txt
 
@@ -96,7 +99,7 @@ RUN MAX_JOBS=2 NVCC_THREADS=1 python -m pip install --no-build-isolation \
 RUN python -m pip install --no-build-isolation \
         -c /tmp/openrlhf-torch-constraints.txt -r /tmp/openrlhf-requirements.txt
 RUN python -m pip install --no-build-isolation \
-        -c /tmp/openrlhf-torch-constraints.txt -c /tmp/openrlhf-requirements.txt verl
+        -c /tmp/openrlhf-torch-constraints.txt -c /tmp/openrlhf-constraints.txt verl
 
 COPY . .
 
