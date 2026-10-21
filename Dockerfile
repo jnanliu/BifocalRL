@@ -59,6 +59,8 @@ RUN unset LD_LIBRARY_PATH LD_PRELOAD PYTHONPATH PYTHONHOME \
         -r /tmp/sandboxfusion-runtime-requirements.txt \
         --editable "$SANDBOXFUSION_HOME" \
     && "$SANDBOXFUSION_PYTHON" -m pip check \
+    && "$SANDBOXFUSION_PYTHON" -c \
+        'from importlib.metadata import version; from packaging.version import Version; assert Version(version("starlette")) >= Version("1.0.1"), "CVE-2026-48710: vulnerable Starlette"; print("SandboxFusion web dependencies:", {p: version(p) for p in ("fastapi", "starlette", "pydantic")})' \
     && rm /tmp/sandboxfusion-runtime-requirements.txt \
     && chmod -R a+rX "$SANDBOXFUSION_HOME"
 
@@ -68,6 +70,8 @@ RUN unset LD_LIBRARY_PATH LD_PRELOAD PYTHONPATH PYTHONHOME \
         'import nltk; nltk.download("punkt"); nltk.download("stopwords")' \
     && "$SANDBOXFUSION_PYTHON" -c \
         'import numpy, pandas, sandbox, scipy, sklearn, torch, uvicorn; assert torch.version.cuda is None; assert (torch.tensor([1, 2]) + 1).tolist() == [2, 3]; print("SandboxFusion isolated runtime OK", torch.__version__, torch._C.__file__)' \
+    && "$SANDBOXFUSION_PYTHON" -c \
+        'from sandbox.server.server import app; assert app.openapi()["paths"]["/run_code"]; print("SandboxFusion API import OK")' \
     && printf '%s\n' \
         '#!/bin/sh' \
         'unset LD_LIBRARY_PATH LD_PRELOAD PYTHONPATH PYTHONHOME' \
@@ -105,6 +109,8 @@ RUN python -m pip install --no-build-isolation \
 COPY . .
 
 RUN python -m pip install --no-build-isolation \
-        -c /tmp/openrlhf-torch-constraints.txt -e '.[vllm,code_eval]'
+        -c /tmp/openrlhf-torch-constraints.txt -e '.[vllm,code_eval]' \
+    && python -c \
+        'from importlib.metadata import version; from packaging.version import Version; assert Version(version("starlette")) >= Version("1.0.1"), "CVE-2026-48710: vulnerable Starlette"; print("Training Starlette:", version("starlette"))'
 
 CMD ["sleep", "infinity"]

@@ -35,6 +35,10 @@ Transformers；不要覆盖旧 BifocalRL 的 Python 环境。无需转换成 Meg
 安装使用 `--no-deps` 并验证导入；没有匹配的 wheel 时构建失败，不进行源码编译。
 脚本也可直接运行，支持 `--uv` 和 `--keep-wheel`。
 
+SandboxFusion 在独立 Python 环境中运行；构建时的补丁同步更新 FastAPI、Pydantic，
+并要求 Starlette ≥1.0.1，修复 [GHSA-86qp-5c8j-p5mr](https://github.com/Kludex/starlette/security/advisories/GHSA-86qp-5c8j-p5mr)。
+构建会检查两个 Python 环境的 Starlette 版本，以及 SandboxFusion API 的导入和 schema 生成。
+
 ```bash
 cd openrlhf
 export HF_CHECKPOINT=/path/to/actor_hf_checkpoint
