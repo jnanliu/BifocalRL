@@ -81,6 +81,8 @@ WORKDIR /home/jliu0514/projects/BifocalRL
 
 COPY . .
 
-RUN python -m pip install -e '.[vllm,code_eval]'
+# FlashAttention's build imports torch, which is provided by the NGC image.
+# Disable build isolation so the build can access that installation.
+RUN python -m pip install --no-build-isolation -e '.[vllm,code_eval]'
 
 CMD ["sleep", "infinity"]
