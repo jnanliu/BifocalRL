@@ -33,9 +33,9 @@ ENV SANDBOXFUSION_HOME=/opt/SandboxFusion \
     SANDBOXFUSION_PYTHON=/opt/sandboxfusion-runtime/bin/python \
     SANDBOXFUSION_WORK_DIR=/mnt/sandboxfusion
 
-COPY sandboxfusion-runtime-requirements.txt \
+COPY examples/bifocalrl/sandboxfusion-runtime-requirements.txt \
     /tmp/sandboxfusion-runtime-requirements.txt
-COPY sandboxfusion-uv-runtime.patch \
+COPY examples/bifocalrl/sandboxfusion-uv-runtime.patch \
     /tmp/sandboxfusion-uv-runtime.patch
 
 RUN git clone --depth=1 https://github.com/bytedance/SandboxFusion.git \
@@ -93,8 +93,9 @@ RUN python -m pip install --no-build-isolation \
 RUN python -m pip install -c /tmp/openrlhf-torch-constraints.txt 'ray[default]==2.55.0'
 RUN python -m pip install --no-build-isolation \
         -c /tmp/openrlhf-torch-constraints.txt 'deepspeed==0.19.6'
-RUN MAX_JOBS=2 NVCC_THREADS=1 python -m pip install --no-build-isolation \
-        -c /tmp/openrlhf-torch-constraints.txt 'flash-attn==2.8.3'
+COPY examples/scripts/install_flash_attn.py /tmp/install_flash_attn.py
+RUN python -m pip install packaging typer \
+    && python /tmp/install_flash_attn.py
 
 RUN python -m pip install --no-build-isolation \
         -c /tmp/openrlhf-torch-constraints.txt -r /tmp/openrlhf-requirements.txt

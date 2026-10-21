@@ -29,6 +29,12 @@
 依赖版本应以该 fork 的 `requirements.txt` 为准，包含 DeepSpeed、vLLM、Ray 和
 Transformers；不要覆盖旧 BifocalRL 的 Python 环境。无需转换成 Megatron checkpoint。
 
+根目录 `Dockerfile` 在安装 vLLM 后调用 `examples/scripts/install_flash_attn.py`，
+从 [社区 wheel 索引](https://github.com/mjun0812/flash-attention-prebuild-wheels/blob/main/doc/packages.md)
+选择匹配 Python、CUDA、PyTorch 和平台标签的 FlashAttention 2.8.3 wheel。
+安装使用 `--no-deps` 并验证导入；没有匹配的 wheel 时构建失败，不进行源码编译。
+脚本也可直接运行，支持 `--uv` 和 `--keep-wheel`。
+
 ```bash
 cd openrlhf
 export HF_CHECKPOINT=/path/to/actor_hf_checkpoint
