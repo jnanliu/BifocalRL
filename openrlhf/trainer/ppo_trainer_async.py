@@ -87,6 +87,8 @@ class GenerateSamplesActor:
 
     def _run_eval(self):
         """Run evaluation and return metrics dict."""
+        if self.eval_dataloader is None:
+            return {}
         logger.info("Starting async evaluation...")
         eval_kwargs = self.generate_kwargs.copy()
         eval_kwargs["temperature"] = self.args.eval.temperature
@@ -212,14 +214,10 @@ class TrainingActor(BasePPOTrainer):
                 _, eval_step, eval_metrics = payload
                 self.rollout_slots.put(global_step, block=True)
                 logger.info(f"Eval at step {eval_step}: {eval_metrics}")
-                if self.wandb_logger:
-                    self.wandb_logger.log_eval(eval_step, eval_metrics)
-                if self.tensorboard_logger:
-                    self.tensorboard_logger.log_eval(eval_step, eval_metrics)
                 # Save best checkpoint if this eval metric is the best so far
                 client_states = dict(self._latest_client_states)
                 client_states["global_step"] = global_step
-                self.save_best_checkpoint(eval_metrics, eval_step, client_states)
+                self.save_eval_logs_and_checkpoint(eval_step, eval_metrics, client_states)
                 # Reset so the next training step's timing excludes eval overhead.
                 step_start_time = time.time()
                 continue
@@ -284,6 +282,7 @@ class PPOTrainerAsync:
         if strategy.args.ckpt.save_steps == -1:
             strategy.args.ckpt.save_steps = float("inf")  # do not save ckpt
 
+        self.eval_before_train = getattr(strategy.args.eval, "before_train", True)
         queue_size = getattr(strategy.args.train, "async_queue_size", 1)
         if queue_size <= 0:
             raise ValueError(f"async_queue_size must be positive, got {queue_size}")
@@ -340,6 +339,12 @@ class PPOTrainerAsync:
                     self.trainer_actor.broadcast_to_vllm.remote(),
                 ]
             )
+
+        # Finish the baseline before either actor can generate training rollouts or update weights.
+        if global_step == 0 and self.eval_before_train:
+            eval_logs = ray.get(self.generator_actor._run_eval.remote())
+            if eval_logs:
+                ray.get(self.trainer_actor.save_eval_logs_and_checkpoint.remote(0, eval_logs, checkpoint_states))
 
         # Launch async training
         ray.get(

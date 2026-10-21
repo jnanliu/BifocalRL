@@ -167,6 +167,103 @@ def test_sync_fit_does_not_train_empty_exhausted_result(ppo_module):
     assert trainer.samples_generator.calls == 1
 
 
+@pytest.mark.parametrize("before_train,has_data,resumed", [
+    (True, True, False), (False, True, False), (True, False, False), (True, True, True),
+])
+def test_sync_initial_eval_precedes_rollout_and_does_not_repeat_on_resume(ppo_module, before_train, has_data, resumed):
+    trainer = _trainer(ppo_module, (["rollout"], None, 1, True))
+    trainer.args.eval.before_train = before_train
+    trainer.args.eval.temperature = 0.6
+    trainer.args.eval.n_samples_per_prompt = 8
+    trainer.eval_dataloader = ["eval"] if has_data else None
+    state = trainer.init_checkpoint_states()
+    state["global_step"] = 5 if resumed else 0
+    trainer.init_checkpoint_states = lambda: state
+    trainer.broadcast_to_vllm = lambda: None
+    trainer.generate_kwargs = {"temperature": 1.0, "n_samples_per_prompt": 16}
+    events = []
+
+    def evaluate(step, **kwargs):
+        assert trainer.samples_generator.calls == 0
+        assert kwargs == {"temperature": 0.6, "n_samples_per_prompt": 8}
+        events.append(("eval", step))
+        return {"eval_math_pass1": 0.5}
+
+    trainer.evaluate = evaluate
+    trainer.save_eval_logs_and_checkpoint = lambda step, logs, states: events.append(("save", step, states.copy()))
+    trainer.train_step = lambda samples, step: (events.append(("train", step)) or ({}, step + 1))
+    trainer.fit()
+
+    if before_train and has_data and not resumed:
+        assert events == [("eval", 0), ("save", 0, state), ("train", 0)]
+    else:
+        assert events == [("train", state["global_step"])]
+    assert trainer.samples_generator.calls == 1
+
+
+def test_sync_periodic_eval_continues_after_initial_eval(ppo_module):
+    trainer = _trainer(ppo_module, (["rollout"], None, 1, True))
+    trainer.eval_dataloader = ["eval"]
+    trainer.args.eval.steps = 1
+    events = []
+    trainer.evaluate = lambda step, **kwargs: events.append(("eval", step)) or {"eval_math_pass1": 0.5}
+    trainer.save_eval_logs_and_checkpoint = lambda step, logs, states: events.append(("save", step))
+    trainer.train_step = lambda samples, step: (events.append(("train", step)) or ({}, step + 1))
+
+    trainer.fit()
+
+    assert events == [("eval", 0), ("save", 0), ("train", 0), ("eval", 1), ("save", 1)]
+
+
+@pytest.fixture
+def async_ppo_module(ppo_module, monkeypatch):
+    monkeypatch.setitem(sys.modules, "openrlhf.trainer.ppo_trainer", ppo_module)
+    monkeypatch.setitem(sys.modules, "ray.util.queue", MagicMock())
+    path = Path(__file__).resolve().parents[1] / "openrlhf/trainer/ppo_trainer_async.py"
+    spec = importlib.util.spec_from_file_location("_openrlhf_async_ppo_trainer_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("before_train", [True, False])
+@pytest.mark.parametrize("resumed", [True, False])
+@pytest.mark.parametrize("has_data", [True, False])
+def test_async_initial_eval_finishes_before_launching_training(async_ppo_module, before_train, resumed, has_data):
+    events = []
+    state = {"episode": 0, "global_step": 5 if resumed else 0,
+             "total_consumed_prompts": 3 if resumed else 0, "data_loader_state_dict": {}}
+    controller = async_ppo_module.PPOTrainerAsync.__new__(async_ppo_module.PPOTrainerAsync)
+    controller.eval_before_train = before_train
+    controller.generator_actor = MagicMock()
+    controller.trainer_actor = MagicMock()
+    controller.trainer_actor.init_checkpoint_states.remote.return_value = state
+    controller.generator_actor._run_eval.remote.side_effect = lambda: events.append("eval") or (
+        {"eval_math_pass1": 0.5} if has_data else {}
+    )
+    controller.trainer_actor.save_eval_logs_and_checkpoint.remote.side_effect = lambda *args: events.append("save")
+    controller.generator_actor.fit.remote.side_effect = lambda **kwargs: events.append("rollout")
+    controller.trainer_actor.fit.remote.side_effect = lambda **kwargs: events.append("train")
+
+    controller.fit()
+
+    expected = (["eval", "save"] if has_data else ["eval"]) if before_train and not resumed else []
+    assert events == expected + ["rollout", "train"]
+    if before_train and not resumed and has_data:
+        controller.trainer_actor.save_eval_logs_and_checkpoint.remote.assert_called_once_with(
+            0, {"eval_math_pass1": 0.5}, state
+        )
+    assert controller.trainer_actor.broadcast_to_vllm.remote.call_count == int(resumed)
+
+
+def test_async_initial_eval_skips_generation_without_dataset(async_ppo_module):
+    generator = async_ppo_module.GenerateSamplesActor.__new__(async_ppo_module.GenerateSamplesActor)
+    generator.eval_dataloader = None
+    generator.samples_generator = MagicMock()
+    assert generator._run_eval() == {}
+    generator.samples_generator.generate_eval_samples.assert_not_called()
+
+
 def _checkpoint_trainer(module):
     trainer = module.BasePPOTrainer.__new__(module.BasePPOTrainer)
     trainer.args = SimpleNamespace(logger=SimpleNamespace(logging_steps=1), ckpt=SimpleNamespace(save_steps=1))
@@ -178,6 +275,25 @@ def _checkpoint_trainer(module):
     trainer.best_eval_metric_value = float("-inf")
     trainer._latest_eval_metric_value = None
     return trainer
+
+
+def test_initial_eval_logs_and_saves_resumable_best_checkpoint(ppo_module):
+    trainer = _checkpoint_trainer(ppo_module)
+    trainer.wandb_logger = MagicMock()
+    trainer.tensorboard_logger = MagicMock()
+    state = {"episode": 0, "global_step": 0, "total_consumed_prompts": 0, "data_loader_state_dict": {}}
+    metrics = {"eval_math_pass1": 0.5}
+
+    trainer.save_eval_logs_and_checkpoint(0, metrics, state)
+
+    trainer.wandb_logger.log_eval.assert_called_once_with(0, metrics)
+    trainer.tensorboard_logger.log_eval.assert_called_once_with(0, metrics)
+    saved = trainer.actor_model_group.async_run_method.call_args.kwargs
+    assert saved["tag"] == "best_global_step0"
+    assert saved["client_states"]["global_step"] == 0
+    assert saved["client_states"]["total_consumed_prompts"] == 0
+    assert saved["client_states"]["data_loader_state_dict"] == {}
+    assert trainer.best_eval_metric_value == 0.5
 
 
 @pytest.mark.parametrize("best,latest", [(0.8, 0.5), (0.0, -0.2), (-0.2, -0.5)])

@@ -1,22 +1,152 @@
 """vLLM prompt-group rollout and optional independent GenPRM scoring."""
 
+# SandboxFusion scoring adapted from VERL; Copyright 2025 Bytedance Ltd. and/or its affiliates.
+# Licensed under Apache-2.0: https://www.apache.org/licenses/LICENSE-2.0
+
 import asyncio
 import hashlib
 import importlib
 import json
+import logging
 import math
+import os
 import random
 import re
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 from .methods import covo_curiosity, covo_features, covo_rewards, prism_reward
 from .voting import cluster_voting_rewards, extract_answers, is_math_equivalent, weighted_majority_voting
 
 _SANDBOX_SEMAPHORES = {}
+
+
+def compute_code_score(
+    sandbox_fusion_url, concurrent_semaphore, memory_limit_mb, completion, test_cases, continuous=False, timeout=10
+):
+    """Score Python test cases remotely, retaining VERL's SandboxFusion comparison semantics."""
+    if "```python" in completion:
+        solution = completion.split("```python")[-1].split("```")[0]
+    elif "```" in completion:
+        solution = completion.split("```")[1]
+        if "\n" in solution:
+            first, rest = solution.split("\n", 1)
+            if first.strip().isalpha():
+                solution = rest
+    else:
+        return 0.0, [{"error": "Invalid completion (missing code block)"}]
+
+    def run_case(index):
+        stdin = test_cases["inputs"][index]
+        stdin = None if stdin is None else str(stdin)
+        expected = test_cases["outputs"][index]
+        assertions = test_cases.get("assert_case", [""] * len(test_cases["inputs"]))
+        code = solution + "\n\n" + str(assertions[index])
+        fn_name = test_cases.get("fn_name")
+        if fn_name:
+            # Benchmark starter code can omit these common imports. This wrapper runs only in the sandbox.
+            modules = (
+                "string re datetime collections heapq bisect copy math random statistics "
+                "itertools functools operator io sys json builtins typing"
+            ).split()
+            imports = "".join(f"from {name} import *\n" for name in modules)
+            imports += "".join(f"import {name}\n" for name in modules) + "import traceback\n"
+            code = imports + code + f'''
+_SANDBOX_FN_NAME = {fn_name!r}
+if __name__ == '__main__':
+    try:
+        _raw = sys.stdin.read()
+        _args = [json.loads(line) for line in _raw.split('\\n')] if _raw.strip() else []
+        _fn = globals().get(_SANDBOX_FN_NAME)
+        if _fn is None:
+            _fn = getattr(Solution(), _SANDBOX_FN_NAME)
+        _value = _fn(*_args)
+    except Exception:
+        traceback.print_exc()
+    else:
+        print(json.dumps(_value) if isinstance(_value, (dict, list, tuple, bool)) or _value is None else str(_value))
+'''
+        payload = {
+            "code": code,
+            "stdin": stdin,
+            "language": "python",
+            "compile_timeout": timeout,
+            "run_timeout": timeout,
+            "memory_limit_MB": memory_limit_mb,
+            "files": {},
+            "fetch_files": [],
+        }
+        metadata = {"case_index": index, "input": stdin, "expected_output": expected}
+        try:
+            with concurrent_semaphore:
+                for attempt in range(3):
+                    request = Request(
+                        sandbox_fusion_url,
+                        data=json.dumps(payload).encode(),
+                        headers={
+                            "Content-Type": "application/json",
+                            "Accept": "application/json"
+                        },
+                    )
+                    try:
+                        with urlopen(request, timeout=2 * timeout + 10) as response:
+                            result = json.load(response)
+                        break
+                    except HTTPError as exc:
+                        exc.close()
+                        if exc.code != 504 or attempt == 2:
+                            raise
+                        logging.getLogger(__name__).warning("Sandbox Fusion HTTP 504; retry %s/2", attempt + 1)
+                        time.sleep(attempt + 1)
+        except Exception as exc:
+            return False, {**metadata, "status": "api_error", "api_request_error": str(exc)}
+
+        if not isinstance(result, dict):
+            return False, {**metadata, "status": "unexpected_response", "api_response": result}
+        metadata["api_response"] = result
+        compile_result = result.get("compile_result") or {}
+        run_result = result.get("run_result") or {}
+        if result.get("status") == "SandboxError":
+            status = "sandbox_error"
+        elif result.get("status") == "Failed":
+            if compile_result.get("status") in ("Error", "TimeLimitExceeded") or (
+                compile_result.get("status") == "Finished" and compile_result.get("return_code") != 0
+            ):
+                status = "compile_timeout" if compile_result.get("status") == "TimeLimitExceeded" else "compile_error"
+            elif run_result.get("status") == "TimeLimitExceeded":
+                status = "timeout"
+            elif run_result.get("status") == "Error" or (
+                run_result.get("status") == "Finished" and run_result.get("return_code") != 0
+            ):
+                status = "runtime_error"
+            else:
+                status = "unknown_failure"
+        elif result.get("status") == "Success" and run_result.get("status") == "Finished":
+            stdout = run_result.get("stdout") or ""
+            passed = expected is None or str(stdout).rstrip("\n") == str(expected).rstrip("\n")
+            status = "success" if passed else "wrong_answer"
+        else:
+            status = "unexpected_response"
+        return status == "success", {**metadata, "status": status}
+
+    workers = min(len(test_cases["inputs"]), max(32, (os.cpu_count() or 1) * 5))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        outcomes = list(executor.map(run_case, range(len(test_cases["inputs"]))))
+    compile_failed = False
+    for index, (passed, metadata) in enumerate(outcomes):
+        if compile_failed and metadata["status"] in ("success", "wrong_answer", "runtime_error", "timeout"):
+            metadata["status"] = "compile_error_skipped"
+            outcomes[index] = False, metadata
+        compile_failed |= metadata["status"] in ("compile_error", "compile_timeout")
+    considered = outcomes[:10] if continuous else outcomes
+    return sum(passed for passed, _ in considered) / len(considered), [metadata for _, metadata in outcomes]
 
 
 async def score_continuation(engine, prefix, continuation):
@@ -26,9 +156,8 @@ async def score_continuation(engine, prefix, continuation):
         raise ValueError("CoVo teacher forcing requires nonempty prefix and continuation")
     # vLLM requires a positive generation budget; discard that extra token.
     result = await engine.generate(
-        list(prefix) + list(continuation), SamplingParams(temperature=1.0, max_tokens=1, prompt_logprobs=1)
-    )
-    rows = result.prompt_logprobs[-len(continuation) :]
+        list(prefix) + list(continuation), SamplingParams(temperature=1.0, max_tokens=1, prompt_logprobs=1))
+    rows = result.prompt_logprobs[-len(continuation):]
     if len(rows) != len(continuation):
         raise ValueError("vLLM prompt logprobs do not cover the forced continuation")
     values = []
@@ -202,10 +331,6 @@ async def generate_group(prompt, label, sampling_params, max_length, tokenizer, 
         if backend == "sandbox_fusion":
             if not cfg["sandbox_fusion_url"]:
                 raise ValueError("Code evaluation requires --bifocal.sandbox_fusion_url or sandbox_fusion_url in JSON")
-            try:
-                from verl.utils.reward_score.sandbox_fusion import compute_score
-            except ImportError as exc:
-                raise ImportError("Code evaluation requires VERL with verl.utils.reward_score.sandbox_fusion") from exc
             cases = specification["test_cases"]
             cases = json.loads(cases) if isinstance(cases, str) else deepcopy(cases)
             if not isinstance(cases, dict):
@@ -227,14 +352,14 @@ async def generate_group(prompt, label, sampling_params, max_length, tokenizer, 
             url = cfg["sandbox_fusion_url"].rstrip("/")
             if not url.endswith("/run_code"):
                 url += "/run_code"
-            # Shared across prompt groups in this worker; VERL runs test cases in threads.
+            # Shared across prompt groups in this worker; test cases run in threads.
             semaphore = _SANDBOX_SEMAPHORES.setdefault(
                 cfg["score_concurrency"], threading.BoundedSemaphore(cfg["score_concurrency"])
             )
             rewards = []
             for response in responses:
                 fraction, execution = await asyncio.to_thread(
-                    compute_score,
+                    compute_code_score,
                     sandbox_fusion_url=url,
                     concurrent_semaphore=semaphore,
                     memory_limit_mb=cfg["sandbox_memory_limit_mb"],
@@ -255,7 +380,7 @@ async def generate_group(prompt, label, sampling_params, max_length, tokenizer, 
                         or (error and not error.startswith("Invalid completion"))
                     ):
                         raise RuntimeError(f"Sandbox Fusion evaluation failed: {case}")
-                # VERL returns a fraction; pass@k requires binary all-tests-passed rewards.
+                # pass@k requires binary all-tests-passed rewards.
                 rewards.append(float(fraction == 1.0))
                 response["extra_logs"].update(code_test_pass_rate=float(fraction), code_num_tests=len(inputs))
         elif backend == "math":

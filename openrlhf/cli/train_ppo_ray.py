@@ -582,6 +582,10 @@ if __name__ == "__main__":
     )
     parser.add_argument("--data.prompt_split", type=str, default="train")
     parser.add_argument("--eval.config", type=str, default=None, help="Independent evaluation JSON configuration")
+    parser.add_argument(
+        "--eval.before_train", action=argparse.BooleanOptionalAction, default=True,
+        help="Evaluate at step 0 before training; skipped when resuming from a nonzero step",
+    )
     parser.add_argument("--eval.dataset", type=str, default=None, help="Path to the evaluation dataset")
     parser.add_argument("--eval.split", type=str, default="train")
     parser.add_argument("--eval.temperature", type=float, default=0.6, help="Temperature for evaluation")
@@ -667,7 +671,8 @@ if __name__ == "__main__":
                 if action.default is not None:
                     parser.error(f"Eval setting {key} cannot be null")
             elif (
-                (action.type is int and type(value) is not int)
+                (isinstance(action, argparse.BooleanOptionalAction) and type(value) is not bool)
+                or (action.type is int and type(value) is not int)
                 or (action.type is float and type(value) not in (int, float))
                 or (action.type is str and not isinstance(value, str))
             ):

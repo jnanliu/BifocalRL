@@ -101,17 +101,18 @@ def test_native_cli_installs_recipe_before_critic_and_reward_selection(recipe, m
         assert args.algo.kl.use_loss and args.algo.kl.init_coef == 0.005
 
 
-@pytest.mark.parametrize("name", ["math", "math_code"])
-def test_eval_json_examples_load_arrays_and_sampling_maps(eval_cli, name):
-    root = Path(__file__).resolve().parents[2]
-    path = root / f"examples/bifocalrl/eval_configs/{name}.json"
+@pytest.mark.parametrize("path", sorted(
+    (Path(__file__).resolve().parents[2] / "examples/bifocalrl/eval_configs").glob("*.json")
+))
+def test_eval_json_examples_load_arrays_and_sampling_maps(eval_cli, path):
     expected = json.loads(path.read_text())
     args = eval_cli(["--eval.config", str(path)])
     assert getattr(args, "eval.dataset") == ",".join(expected["dataset"])
     assert getattr(args, "eval.steps") == expected["steps"]
     assert getattr(args, "eval.temperature") == expected["temperature"]
     assert getattr(args, "eval.label_key") == "label"
-    if name == "math_code":
+    assert getattr(args, "eval.before_train") is True
+    if "sandbox_fusion_url" in expected:
         assert json.loads(getattr(args, "eval.n_samples_per_prompt_by_datasource")) == expected["n_samples_per_prompt_by_datasource"]
         assert getattr(args, "eval.sandbox_fusion_url") == expected["sandbox_fusion_url"]
         assert getattr(args, "eval.sandbox_concurrency") == 16
@@ -128,10 +129,22 @@ def test_eval_cli_overrides_json_even_when_value_equals_parser_default(eval_cli,
     assert getattr(args, "eval.sandbox_fusion_url") == "http://cli/run_code"
 
 
+@pytest.mark.parametrize("setting", [True, False])
+def test_initial_eval_json_and_explicit_cli_override(eval_cli, tmp_path, setting):
+    path = tmp_path / "eval.json"
+    path.write_text(json.dumps({"before_train": setting, "steps": -1}))
+    assert getattr(eval_cli(["--eval.config", str(path)]), "eval.before_train") is setting
+    flag = "--no-eval.before_train" if setting else "--eval.before_train"
+    args = eval_cli(["--eval.config", str(path), flag])
+    assert getattr(args, "eval.before_train") is not setting
+    assert getattr(args, "eval.steps") == -1
+
+
 @pytest.mark.parametrize("settings", [
     [], {"unknown": 1}, {"dataset": []}, {"dataset": [1]}, {"n_samples_per_prompt": 1.5},
     {"n_samples_per_prompt": 0}, {"temperature": -1}, {"steps": 0}, {"sandbox_timeout": 0},
     {"n_samples_per_prompt_by_datasource": {"math": True}},
+    {"before_train": "false"}, {"before_train": 0}, {"before_train": None},
 ])
 def test_invalid_eval_json_fails_before_training(eval_cli, tmp_path, settings):
     path = tmp_path / "eval.json"
@@ -148,9 +161,10 @@ def test_run_script_preserves_json_defaults_and_explicit_environment_overrides(e
     capture.write_text(f"#!{sys.executable}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n")
     capture.chmod(0o755)
     env = {key: value for key, value in os.environ.items() if not key.startswith("EVAL_")}
-    env.update(PYTHON=str(capture), HF_CHECKPOINT="model", PROMPT_DATA="train.jsonl")
+    env.update(PYTHON=str(capture), MODEL_PATH="model", PROMPT_DATA="train.jsonl")
     command = ["bash", str(root / "examples/bifocalrl/run.sh"), "bifocalrl"]
-    config = str(root / "examples/bifocalrl/eval_configs/math_code.json")
+    config = str(root / "examples/bifocalrl/eval_configs/math.json")
+    expected = json.loads(Path(config).read_text())
     if config_via_env:
         env["EVAL_CONFIG"] = config
     else:
@@ -160,6 +174,6 @@ def test_run_script_preserves_json_defaults_and_explicit_environment_overrides(e
             env.update(EVAL_DATA="override.jsonl", EVAL_N_SAMPLES_PER_PROMPT="2")
         output = subprocess.check_output(command, env=env, text=True)
         args = eval_cli(json.loads(output)[2:])
-        assert getattr(args, "eval.temperature") == 0.6
-        assert getattr(args, "eval.n_samples_per_prompt") == (2 if override else 1)
-        assert getattr(args, "eval.dataset") == ("override.jsonl" if override else "data/math500.jsonl,data/code_eval.jsonl")
+        assert getattr(args, "eval.temperature") == expected["temperature"]
+        assert getattr(args, "eval.n_samples_per_prompt") == (2 if override else expected["n_samples_per_prompt"])
+        assert getattr(args, "eval.dataset") == ("override.jsonl" if override else ",".join(expected["dataset"]))

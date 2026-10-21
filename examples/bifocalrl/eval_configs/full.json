@@ -1,0 +1,19 @@
+{
+  "dataset": ["datasets/aime24.jsonl", "datasets/aime25.jsonl", "datasets/amc.jsonl", "datasets/gpqa.jsonl", "datasets/livecodebench.jsonl"],
+  "split": "test",
+  "steps": 20,
+  "temperature": 0.6,
+  "n_samples_per_prompt": 8,
+  "n_samples_per_prompt_by_datasource": {
+    "aime24": 16,
+    "aime25": 16,
+    "amc": 16,
+    "gpqa": 4,
+    "livecodebench": 4
+  },
+  "label_key": "label",
+  "sandbox_fusion_url": "http://127.0.0.1:8080/run_code",
+  "sandbox_timeout": 10,
+  "sandbox_memory_limit_mb": 1024,
+  "sandbox_concurrency": 16
+}

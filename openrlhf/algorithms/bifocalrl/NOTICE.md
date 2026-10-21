@@ -10,9 +10,13 @@ fusion weights, query reweighting and retained-batch normalization as documented
 in the example README. The answer-conditioned SC decomposition is a local
 extension, not part of the GD2PO paper.
 
-Code evaluation delegates to VERL's optional Sandbox Fusion `compute_score`
-implementation. Its fractional test score is logged separately; benchmark
-pass metrics use binary all-tests-passed outcomes. No VERL source is vendored.
+Code evaluation uses a local implementation in `rollout.compute_code_score`,
+adapted from VERL's Apache-2.0 Sandbox Fusion scorer (Copyright 2025 Bytedance
+Ltd. and/or its affiliates), without importing or installing VERL. The local
+adaptation uses standard-library HTTP requests and retains Python code extraction,
+function wrappers, output comparison, concurrency limits and gateway retries.
+Its fractional test score is logged separately; benchmark pass metrics use
+binary all-tests-passed outcomes.
 
 `legacy/math.py` retains the PRIME/TTRL Apache-2.0 notice in its source. Other
 ported files follow their source repository's license. No CoVo source files were

@@ -155,3 +155,6 @@ wandb
 !.claude/skills
 !.claude/skills/**
 *tmp*
+
+logs/
+output/

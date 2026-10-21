@@ -116,6 +116,7 @@ JSON 键名与 `--eval.*` 去掉前缀后相同：
 | --- | --- |
 | `dataset` | 单个/逗号分隔路径字符串，或数据集路径数组；相对路径按运行目录解析 |
 | `split`, `steps`, `temperature` | 全局评估 split、间隔和温度；steps 为 -1 时禁用周期评估 |
+| `before_train` | 默认 true：配置 eval 数据后，在 step 0 先评估；从非零 step 恢复时跳过 |
 | `n_samples_per_prompt` | 全局采样数 |
 | `n_samples_per_prompt_by_datasource` | 各 datasource 采样数的 JSON 对象 |
 | `label_key` | eval 专用标签列，不改变训练数据读取 |
@@ -126,6 +127,11 @@ JSON 键名与 `--eval.*` 去掉前缀后相同：
 因此可以覆盖 JSON；使用 EVAL_CONFIG 时，脚本不会自动注入 greedy/n=1 等旧默认值。
 例如 `EVAL_CONFIG=... bash examples/bifocalrl/run.sh bifocalrl --eval.steps 20`。
 未知字段和非法类型会在启动训练前报错。
+
+同步和异步训练都会在首次训练 rollout 前完成初始评估，日志记为 step 0，并纳入 best checkpoint 比较。
+初始评估沿用所有 eval 数据集、采样数和评分配置，不消耗训练数据，也不增加训练 step。
+可设置 JSON `"before_train": false` 或传入 `--no-eval.before_train` 关闭；
+`--eval.steps -1` 只关闭周期评估，初始评估由 `before_train` 单独控制。
 
 评估默认从 `label` 列读取正确答案，可在算法 JSON 中设置 `eval_label_key`。
 这一覆盖仅作用于 eval Dataset，训练集仍可完全没有标签列。
@@ -155,10 +161,9 @@ SANDBOX_FUSION_URL=http://127.0.0.1:8080/run_code \
 
 ### 代码 benchmark：Sandbox Fusion
 
-代码 eval 按需调用 VERL 的
-[`verl.utils.reward_score.sandbox_fusion.compute_score`](https://github.com/volcengine/verl/blob/main/verl/utils/reward_score/sandbox_fusion/__init__.py)。
-在所有 vLLM worker 的环境安装可提供该接口的 VERL，例如 `pip install -e '.[code_eval]'`，
-并准备 worker 可以访问的 Sandbox Fusion `/run_code` 服务。数学评估不需要 VERL。
+代码 eval 使用本地 `rollout.compute_code_score`，直接调用 Sandbox Fusion `/run_code` 服务，
+无需安装 VERL。`code_eval` extra 保留为兼容入口，不增加依赖。
+需准备所有 vLLM worker 都可以访问的 Sandbox Fusion 服务。
 生成程序只送往该服务执行。
 
 先将 benchmark 导出为包含完整 prompt 和测试用例的 JSONL：
@@ -185,10 +190,10 @@ EVAL_DATA=data/math500.jsonl,data/code_eval.jsonl EVAL_STEPS=10 \
 
 支持 Python stdin/stdout 题、带 `fn_name` 的函数或 `Solution` 方法题，以及
 `assert_case` 列表。函数参数使用每行一个 JSON 值的输入字符串；prompt 应包含题目的
-starter code/函数签名，并要求 fenced Python code block。代码提取、函数包装及输出比较由 VERL 处理。
+starter code/函数签名，并要求 fenced Python code block。代码提取、函数包装及输出比较均由本地评分逻辑处理。
 对于 LiveCodeBench，可使用其导出的 `input_output`（inputs/outputs/fn_name）作为 tests 列，
 须包含评估所需的公开与私有用例；本转换器不直接解码原始发布数据中的压缩私有用例。
-该后端采用 VERL 的判定语义，不等价于接入 LiveCodeBench 官方完整评测 harness。
+该后端保留 VERL SandboxFusion 的判定语义，不等价于接入 LiveCodeBench 官方完整评测 harness。
 
 代码服务参数可放入独立 eval JSON，例如：
 
@@ -208,7 +213,7 @@ starter code/函数签名，并要求 fenced Python code block。代码提取、
 算法 JSON 中原有 sandbox 字段及 `score_concurrency` 仍作为未覆盖时的后备值；
 eval JSON 的并发数、超时和内存只覆盖评估，不改变 PRISM 等训练评分配置。
 
-VERL 返回的测试用例通过率额外记录为 `eval_livecodebench_test_pass_rate`。
+测试用例通过率额外记录为 `eval_livecodebench_test_pass_rate`。
 只有程序通过全部用例才赋 1，否则赋 0，再计算现有的
 `eval_livecodebench_pass1/passK`，不会把部分用例通过率当作 pass@k。
 服务连接/内部错误会使评估报错；错误答案、编译/运行错误、用例执行超时及缺少代码块记为 0。

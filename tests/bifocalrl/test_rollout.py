@@ -9,6 +9,7 @@ from types import SimpleNamespace as NS
 import pytest
 import torch
 
+from openrlhf.algorithms.bifocalrl import rollout
 from openrlhf.algorithms.bifocalrl.rollout import generate_group, score_continuation
 from openrlhf.algorithms.bifocalrl.runtime import DEFAULTS
 from tests.test_experience import Experience
@@ -120,7 +121,7 @@ def test_eval_disables_tree_and_uses_label():
 
 
 @pytest.mark.parametrize("encoded", [False, True])
-def test_code_eval_delegates_to_verl_and_requires_all_tests_to_pass(monkeypatch, encoded):
+def test_code_eval_uses_local_scorer_and_requires_all_tests_to_pass(monkeypatch, encoded):
     calls = []
     main_thread = threading.get_ident()
     cases = {"inputs": ["secret", "second"], "outputs": ["1", "2"], "fn_name": "solve"}
@@ -135,7 +136,7 @@ def test_code_eval_delegates_to_verl_and_requires_all_tests_to_pass(monkeypatch,
         calls.append(kwargs)
         return (1. if len(calls) == 1 else 0.5), [{"status": "success"}, {"status": "wrong_answer"}]
 
-    monkeypatch.setitem(sys.modules, "verl.utils.reward_score.sandbox_fusion", NS(compute_score=compute_score))
+    monkeypatch.setattr(rollout, "compute_code_score", compute_score)
     label = {"backend": "sandbox_fusion", "test_cases": json.dumps(cases) if encoded else cases}
     engine = Engine(["```python\nprint(1)\n```", "```python\nprint(2)\n```"])
     cfg = {
@@ -172,8 +173,7 @@ def test_code_eval_delegates_to_verl_and_requires_all_tests_to_pass(monkeypatch,
     [],
 ])
 def test_code_eval_service_and_data_errors_do_not_become_incorrect_programs(monkeypatch, execution):
-    monkeypatch.setitem(sys.modules, "verl.utils.reward_score.sandbox_fusion",
-                        NS(compute_score=lambda **kwargs: (0., execution)))
+    monkeypatch.setattr(rollout, "compute_code_score", lambda **kwargs: (0., execution))
     cfg = {**DEFAULTS, "sandbox_fusion_url": "http://sandbox/run_code"}
     params = SamplingParams(extra_args={"bifocal": cfg, "bifocal_evaluation": True})
     label = {"backend": "sandbox_fusion", "test_cases": {"inputs": ["1"], "outputs": ["2"]}}
@@ -184,10 +184,7 @@ def test_code_eval_service_and_data_errors_do_not_become_incorrect_programs(monk
 @pytest.mark.parametrize("status",
                          ["wrong_answer", "compile_error", "compile_error_skipped", "runtime_error", "timeout"])
 def test_code_eval_program_failures_are_zero_scores(monkeypatch, status):
-    monkeypatch.setitem(sys.modules, "verl.utils.reward_score.sandbox_fusion",
-                        NS(compute_score=lambda **kwargs: (0., [{
-                            "status": status
-                        }])))
+    monkeypatch.setattr(rollout, "compute_code_score", lambda **kwargs: (0., [{"status": status}]))
     cfg = {**DEFAULTS, "sandbox_fusion_url": "http://sandbox"}
     params = SamplingParams(extra_args={"bifocal": cfg, "bifocal_evaluation": True})
     label = {"backend": "sandbox_fusion", "test_cases": {"assert_case": ["assert solve() == 1"]}}
@@ -196,11 +193,10 @@ def test_code_eval_program_failures_are_zero_scores(monkeypatch, status):
 
 
 def test_code_eval_missing_code_block_is_an_incorrect_program(monkeypatch):
-    monkeypatch.setitem(
-        sys.modules, "verl.utils.reward_score.sandbox_fusion",
-        NS(compute_score=lambda **kwargs: (0., [{
-            "error": "Invalid completion (missing code block)"
-        }])))
+    monkeypatch.setattr(rollout, "compute_code_score", lambda **kwargs:
+                        (0., [{
+                            "error": "Invalid completion (missing code block)"
+                        }]))
     cfg = {**DEFAULTS, "sandbox_fusion_url": "http://sandbox"}
     params = SamplingParams(extra_args={"bifocal": cfg, "bifocal_evaluation": True})
     label = {"backend": "sandbox_fusion", "test_cases": {"inputs": ["1"], "outputs": ["2"]}}
@@ -227,8 +223,8 @@ def test_code_eval_missing_code_block_is_an_incorrect_program(monkeypatch):
     },
 ])
 def test_code_eval_rejects_empty_or_mismatched_test_cases(monkeypatch, cases):
-    monkeypatch.setitem(sys.modules, "verl.utils.reward_score.sandbox_fusion",
-                        NS(compute_score=lambda **kwargs: pytest.fail("Invalid cases reached the scorer")))
+    monkeypatch.setattr(rollout, "compute_code_score",
+                        lambda **kwargs: pytest.fail("Invalid cases reached the scorer"))
     cfg = {**DEFAULTS, "sandbox_fusion_url": "http://sandbox"}
     params = SamplingParams(extra_args={"bifocal": cfg, "bifocal_evaluation": True})
     with pytest.raises(ValueError):
@@ -248,6 +244,294 @@ def test_code_eval_requires_endpoint_but_code_labels_are_ignored_in_training():
     records = asyncio.run(generate_group("q", label, params, 128, Tokenizer(), Engine([r"\boxed{1}"]), 1))
     assert records[0]["reward"] == 1.
     assert "code_test_pass_rate" not in records[0]["extra_logs"]
+
+
+@pytest.mark.parametrize("completion,cases,rate", [
+    ("```python\nprint(int(input()) * 2)\n```", {
+        "inputs": ["2\n", "3\n"],
+        "outputs": ["4", "7"]
+    }, 0.5),
+    ("```\nprint('ok')\n```", {
+        "inputs": [""],
+        "outputs": ["ok\n\n"]
+    }, 1.),
+    ("```python\nprint(' ok ')\n```", {
+        "inputs": [""],
+        "outputs": ["ok"]
+    }, 0.),
+    ("```python\nprint('你好')\n```", {
+        "inputs": [""],
+        "outputs": ["你好"]
+    }, 1.),
+    ("```python\ndef add(a, b):\n    return a + b\n```", {
+        "inputs": ["1\n2"],
+        "outputs": ["3"],
+        "fn_name": "add"
+    }, 1.),
+    ("```python\nclass Solution:\n    def solve(self, xs: List[int]):\n        return list(reversed(xs))\n```", {
+        "inputs": ["[1, 2]"],
+        "outputs": ["[2, 1]"],
+        "fn_name": "solve"
+    }, 1.),
+    ("```python\ndef solve():\n    return True\n```", {
+        "inputs": [""],
+        "outputs": ["true"],
+        "fn_name": "solve"
+    }, 1.),
+    ("```python\ndef solve():\n    return None\n```", {
+        "inputs": [""],
+        "outputs": ["null"],
+        "fn_name": "solve"
+    }, 1.),
+    ("```python\ndef solve():\n    return 1\n```", {
+        "assert_case": ["assert solve() == 1", "assert solve() == 2"]
+    }, 0.5),
+    ("```python\nprint(0)\n```\n```python\nprint(1)\n```", {
+        "inputs": [""],
+        "outputs": ["1"]
+    }, 1.),
+    ("```python\nassert False\n```", {
+        "inputs": [""],
+        "outputs": [""]
+    }, 0.),
+    ("No code block", {
+        "inputs": [""],
+        "outputs": ["1"]
+    }, 0.),
+])
+def test_local_code_scoring_over_http_without_verl(monkeypatch, completion, cases, rate):
+    import builtins
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    original_import = builtins.__import__
+
+    def import_without_verl(name, *args, **kwargs):
+        if name == "verl" or name.startswith("verl."):
+            raise AssertionError("Code evaluation imported VERL")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_verl)
+
+    async def run():
+        requests = []
+
+        async def execute(request):
+            payload = await request.json()
+            requests.append(payload)
+            assert payload["language"] == "python"
+            assert payload["compile_timeout"] == payload["run_timeout"] == 2
+            assert payload["memory_limit_MB"] == 256
+            # This mock service executes only the trusted Python fixtures above, as a separate process.
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                payload["code"],
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate((payload["stdin"] or "").encode())
+            return web.json_response({
+                "status": "Success" if process.returncode == 0 else "Failed",
+                "run_result": {
+                    "status": "Finished",
+                    "return_code": process.returncode,
+                    "stdout": stdout.decode(),
+                    "stderr": stderr.decode()
+                },
+            })
+
+        app = web.Application()
+        app.router.add_post("/run_code", execute)
+        async with TestServer(app) as server:
+            cfg = {
+                **DEFAULTS, "sandbox_fusion_url": str(server.make_url("/")),
+                "sandbox_timeout": 2,
+                "sandbox_memory_limit_mb": 256
+            }
+            params = SamplingParams(extra_args={"bifocal": cfg, "bifocal_evaluation": True})
+            records = await generate_group("q", {
+                "backend": "sandbox_fusion",
+                "test_cases": cases
+            }, params, 256, Tokenizer(), Engine([completion]), 1)
+        assert records[0]["reward"] == float(rate == 1.)
+        assert records[0]["extra_logs"]["code_test_pass_rate"] == rate
+        assert len(requests) == (0 if completion == "No code block" else len(
+            cases.get("inputs", cases.get("assert_case"))))
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("response,status", [
+    ({
+        "status": "Failed",
+        "compile_result": {
+            "status": "Finished",
+            "return_code": 1
+        }
+    }, "compile_error"),
+    ({
+        "status": "Failed",
+        "compile_result": {
+            "status": "TimeLimitExceeded"
+        }
+    }, "compile_timeout"),
+    ({
+        "status": "Failed",
+        "run_result": {
+            "status": "TimeLimitExceeded"
+        }
+    }, "timeout"),
+    ({
+        "status": "Failed",
+        "run_result": {
+            "status": "Error"
+        }
+    }, "runtime_error"),
+    ({
+        "status": "SandboxError"
+    }, "sandbox_error"),
+    ({
+        "status": "Success"
+    }, "unexpected_response"),
+    ([], "unexpected_response"),
+])
+def test_local_code_scorer_classifies_http_responses(response, status):
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    async def run():
+        async def execute(request):
+            return web.json_response(response)
+
+        app = web.Application()
+        app.router.add_post("/run_code", execute)
+        async with TestServer(app) as server:
+            rate, metadata = await asyncio.to_thread(
+                rollout.compute_code_score,
+                str(server.make_url("/run_code")),
+                threading.BoundedSemaphore(2),
+                256,
+                "```python\npass\n```",
+                {
+                    "inputs": ["", ""],
+                    "outputs": ["", ""]
+                },
+            )
+        assert rate == 0
+        assert metadata[0]["status"] == status
+        assert metadata[1]["status"] == status
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure,attempts", [(504, 3), (503, 1), ("invalid_json", 1), ("recover", 2)])
+def test_local_code_scorer_retries_gateway_timeouts_and_reports_transport_errors(monkeypatch, failure, attempts):
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    delays = []
+    monkeypatch.setattr(rollout.time, "sleep", delays.append)
+
+    async def run():
+        calls = []
+
+        async def execute(request):
+            calls.append(await request.json())
+            if failure == "recover":
+                if len(calls) == 1:
+                    return web.Response(status=504)
+                return web.json_response({"status": "Success", "run_result": {"status": "Finished", "stdout": ""}})
+            return web.Response(text="invalid json", status=200 if failure == "invalid_json" else failure)
+
+        app = web.Application()
+        app.router.add_post("/run_code", execute)
+        async with TestServer(app) as server:
+            rate, metadata = await asyncio.to_thread(
+                rollout.compute_code_score,
+                str(server.make_url("/run_code")),
+                threading.BoundedSemaphore(2),
+                256,
+                "```python\npass\n```",
+                {
+                    "inputs": [""],
+                    "outputs": [""]
+                },
+            )
+        assert len(calls) == attempts
+        if failure == "recover":
+            assert rate == 1 and metadata[0]["status"] == "success"
+        else:
+            assert rate == 0 and metadata[0]["status"] == "api_error" and metadata[0]["api_request_error"]
+        assert delays == ([1, 2] if failure == 504 else [1] if failure == "recover" else [])
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("last_response,last_status", [
+    ({"status": "Success", "run_result": {"status": "Finished", "stdout": "1"}}, "compile_error_skipped"),
+    ({"status": "SandboxError"}, "sandbox_error"),
+])
+def test_local_code_scorer_propagates_compile_errors_without_hiding_service_failures(last_response, last_status):
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    async def run():
+        async def execute(request):
+            payload = await request.json()
+            if payload["stdin"] == "0":
+                return web.json_response({"status": "Failed", "compile_result": {"status": "Error"}})
+            return web.json_response(last_response)
+
+        app = web.Application()
+        app.router.add_post("/run_code", execute)
+        async with TestServer(app) as server:
+            rate, metadata = await asyncio.to_thread(
+                rollout.compute_code_score, str(server.make_url("/run_code")), threading.BoundedSemaphore(2),
+                256, "```python\npass\n```", {"inputs": ["0", "1"], "outputs": ["1", "1"]},
+            )
+        assert rate == 0
+        assert [m["status"] for m in metadata] == ["compile_error", last_status]
+
+    asyncio.run(run())
+
+
+def test_local_code_scoring_shares_concurrency_limit_across_queries():
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    async def run():
+        active, peak = 0, 0
+
+        async def execute(request):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.02)
+            active -= 1
+            return web.json_response({
+                "status": "Success",
+                "run_result": {
+                    "status": "Finished",
+                    "return_code": 0,
+                    "stdout": "1\n",
+                }
+            })
+
+        app = web.Application()
+        app.router.add_post("/run_code", execute)
+        async with TestServer(app) as server:
+            cfg = {**DEFAULTS, "sandbox_fusion_url": str(server.make_url("/run_code")), "score_concurrency": 2}
+            params = SamplingParams(extra_args={"bifocal": cfg, "bifocal_evaluation": True})
+            label = {"backend": "sandbox_fusion", "test_cases": {"inputs": [""] * 4, "outputs": ["1"] * 4}}
+            groups = await asyncio.gather(
+                *(generate_group("q", label, params, 256, Tokenizer(), Engine(["```python\nprint(1)\n```"]), 1)
+                  for _ in range(2)))
+        assert peak == 2
+        assert all(group[0]["reward"] == 1 for group in groups)
+
+    asyncio.run(run())
 
 
 def test_covo_scores_current_engine_prefixes(monkeypatch):

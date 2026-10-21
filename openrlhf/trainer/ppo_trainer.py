@@ -419,6 +419,13 @@ class BasePPOTrainer(ABC):
             ray.get(refs)
             logger.info(f"Saved best checkpoint: {tag} ({metric_key}={current_value:.4f})")
 
+    def save_eval_logs_and_checkpoint(self, global_step, eval_logs, client_states):
+        if self.wandb_logger:
+            self.wandb_logger.log_eval(global_step, eval_logs)
+        if self.tensorboard_logger:
+            self.tensorboard_logger.log_eval(global_step, eval_logs)
+        self.save_best_checkpoint(eval_logs, global_step, client_states)
+
     def save_logs_and_checkpoints(self, global_step: int, logs_dict=None, client_states=None) -> None:
         logs_dict = logs_dict or {}
         if global_step % self.args.logger.logging_steps == 0:
@@ -555,6 +562,15 @@ class PPOTrainer(BasePPOTrainer):
             if state_dict:
                 self.prompts_dataloader.load_state_dict(state_dict)
 
+        eval_generate_kwargs = {
+            **self.generate_kwargs,
+            "temperature": self.args.eval.temperature,
+            "n_samples_per_prompt": self.args.eval.n_samples_per_prompt,
+        }
+        if global_step == 0 and self.eval_dataloader and getattr(self.args.eval, "before_train", True):
+            eval_logs = self.evaluate(0, **eval_generate_kwargs)
+            self.save_eval_logs_and_checkpoint(0, eval_logs, checkpoint_states)
+
         for episode in range(start_episode, self.args.train.num_episodes):
             dataset_length = len(self.prompts_dataloader)
             pbar = tqdm(
@@ -599,11 +615,8 @@ class PPOTrainer(BasePPOTrainer):
 
                 # Evaluation and best checkpoint saving
                 if global_step % self.args.eval.steps == 0 and self.eval_dataloader:
-                    eval_generate_kwargs = self.generate_kwargs.copy()
-                    eval_generate_kwargs["temperature"] = self.args.eval.temperature
-                    eval_generate_kwargs["n_samples_per_prompt"] = self.args.eval.n_samples_per_prompt
                     eval_logs = self.evaluate(global_step, **eval_generate_kwargs)
-                    self.save_best_checkpoint(eval_logs, global_step, client_states)
+                    self.save_eval_logs_and_checkpoint(global_step, eval_logs, client_states)
 
                 pbar.update(prompts_consumed)
 
@@ -624,11 +637,6 @@ class PPOTrainer(BasePPOTrainer):
 
         samples_list = self.samples_generator.generate_eval_samples(**generate_kwargs)
         logs = compute_eval_metrics(self.eval_dataloader, samples_list, generate_kwargs["n_samples_per_prompt"])
-
-        if self.wandb_logger:
-            self.wandb_logger.log_eval(global_step, logs)
-        if self.tensorboard_logger:
-            self.tensorboard_logger.log_eval(global_step, logs)
 
         end_time = time.time()
         duration = end_time - start_time

@@ -16,8 +16,12 @@ def convert(
             if limit is not None and count >= limit:
                 break
             prompt = row[prompt_key]
+            if label_format == "sanbdox_fusion":
+                prefix = ""
+            else:
+                prefix = "Please solve the following problem step by step and put your final answer enclosed in \\boxed{}.\n\n"
             if isinstance(prompt, str) and not plain_prompts:
-                prompt = [{"role": "user", "content": prompt}]
+                prompt = [{"role": "user", "content":  prefix + prompt}]
             record = {
                 "prompt": prompt,
                 "datasource": datasource if datasource is not None else row.get("datasource") or "default",

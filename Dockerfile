@@ -103,13 +103,11 @@ RUN python -m pip install packaging typer \
 
 RUN python -m pip install --no-build-isolation \
         -c /tmp/openrlhf-torch-constraints.txt -r /tmp/openrlhf-requirements.txt
-RUN python -m pip install --no-build-isolation \
-        -c /tmp/openrlhf-torch-constraints.txt -c /tmp/openrlhf-constraints.txt verl
 
 COPY . .
 
 RUN python -m pip install --no-build-isolation \
-        -c /tmp/openrlhf-torch-constraints.txt -e '.[vllm,code_eval]' \
+        -c /tmp/openrlhf-torch-constraints.txt -e '.[vllm,liger]' \
     && python -c \
         'from importlib.metadata import version; from packaging.version import Version; assert Version(version("starlette")) >= Version("1.0.1"), "CVE-2026-48710: vulnerable Starlette"; print("Training Starlette:", version("starlette"))'
 
