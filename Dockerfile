@@ -119,4 +119,12 @@ RUN git lfs install --system \
     && git config --system user.name "git-remote-s3 tests" \
     && git config --system user.email "test@example.com"
 
+# PEFT probes NGC's optional Transformer Engine during import.
+# Remove its incompatible CUDA build after installing training dependencies.
+RUN python -m pip uninstall -y \
+        transformer-engine transformer-engine-torch \
+        transformer-engine-cu12 transformer-engine-cu13 \
+    && python -c \
+        'from peft import LoraConfig; from openrlhf.models import Actor; print("PEFT and OpenRLHF Actor import OK")'
+
 CMD ["sleep", "infinity"]
