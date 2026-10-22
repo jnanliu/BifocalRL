@@ -111,4 +111,12 @@ RUN python -m pip install --no-build-isolation \
     && python -c \
         'from importlib.metadata import version; from packaging.version import Version; assert Version(version("starlette")) >= Version("1.0.1"), "CVE-2026-48710: vulnerable Starlette"; print("Training Starlette:", version("starlette"))'
 
+# Enable repository syncing to Maveric user space through S3 and Git LFS.
+RUN python -m pip install --no-cache-dir git-remote-s3
+
+RUN git lfs install --system \
+    && git config --system protocol.s3.allow always \
+    && git config --system user.name "git-remote-s3 tests" \
+    && git config --system user.email "test@example.com"
+
 CMD ["sleep", "infinity"]
