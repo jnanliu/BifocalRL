@@ -159,3 +159,5 @@ wandb
 logs/
 output/
 /examples/bifocalrl/submit_job.sh
+/datasets/train.jsonl
+/datasets/gpqa.jsonl
