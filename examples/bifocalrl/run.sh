@@ -86,7 +86,7 @@ if [[ -n "${EVAL_N_SAMPLES_PER_PROMPT_BY_DATASOURCE:-}" ]]; then
   EXTRA+=(--eval.n_samples_per_prompt_by_datasource "$EVAL_N_SAMPLES_PER_PROMPT_BY_DATASOURCE")
 fi
 
-exec "${PYTHON:-python}" -m openrlhf.cli.train_ppo_ray \
+COMMAND=("${PYTHON:-python}" -m openrlhf.cli.train_ppo_ray \
   --bifocal.config "$RECIPE" \
   --actor.model_name_or_path "$MODEL_PATH" \
   --actor.num_nodes "$NNODE" \
@@ -128,4 +128,9 @@ exec "${PYTHON:-python}" -m openrlhf.cli.train_ppo_ray \
   --ckpt.disable_ds \
   --logger.tensorboard_dir "$OUTPUT_DIR/logs" \
   --logger.logging_steps 1 \
-  "${EXTRA[@]}" "$@"
+  "${EXTRA[@]}" "$@")
+
+printf 'Running command: '
+printf '%q ' "${COMMAND[@]}"
+printf '\n'
+exec "${COMMAND[@]}"

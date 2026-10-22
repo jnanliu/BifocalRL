@@ -6,6 +6,7 @@ import importlib.util
 import json
 import math
 import os
+import shlex
 import subprocess
 import sys
 from datetime import datetime
@@ -161,7 +162,7 @@ def test_run_script_preserves_json_defaults_and_explicit_environment_overrides(e
     capture.write_text(f"#!{sys.executable}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n")
     capture.chmod(0o755)
     env = {key: value for key, value in os.environ.items() if not key.startswith("EVAL_")}
-    env.update(PYTHON=str(capture), MODEL_PATH="model", PROMPT_DATA="train.jsonl")
+    env.update(PYTHON=str(capture), MODEL_PATH="model with spaces", PROMPT_DATA="train.jsonl")
     command = ["bash", str(root / "examples/bifocalrl/run.sh"), "bifocalrl"]
     config = str(root / "examples/bifocalrl/eval_configs/math.json")
     expected = json.loads(Path(config).read_text())
@@ -173,7 +174,11 @@ def test_run_script_preserves_json_defaults_and_explicit_environment_overrides(e
         if override:
             env.update(EVAL_DATA="override.jsonl", EVAL_N_SAMPLES_PER_PROMPT="2")
         output = subprocess.check_output(command, env=env, text=True)
-        args = eval_cli(json.loads(output)[2:])
+        printed, captured = output.splitlines()
+        argv = json.loads(captured)
+        assert printed.startswith("Running command: ")
+        assert shlex.split(printed.removeprefix("Running command: ")) == [str(capture), *argv]
+        args = eval_cli(argv[2:])
         assert getattr(args, "eval.temperature") == expected["temperature"]
         assert getattr(args, "eval.n_samples_per_prompt") == (2 if override else expected["n_samples_per_prompt"])
         assert getattr(args, "eval.dataset") == ("override.jsonl" if override else ",".join(expected["dataset"]))
