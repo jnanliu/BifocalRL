@@ -24,7 +24,7 @@ VLLM_TP="${VLLM_TP_SIZE:-1}"
 
 GROUP_SIZE="${GROUP_SIZE:-16}"
 PROMPTS_PER_ROLLOUT="${PROMPTS_PER_ROLLOUT:-64}"
-OUTPUT_DIR="${OUTPUT_DIR:-output/bifocalrl-${RECIPE_NAME}}"
+OUTPUT_DIR="${OUTPUT_DIR:-output/${MODEL_PATH##*/}/${RECIPE_NAME}}"
 
 if (( GPUS % VLLM_TP )); then
   echo "NUM_GPUS must be divisible by VLLM_TP_SIZE" >&2
@@ -91,6 +91,8 @@ COMMAND=("${PYTHON:-python}" -m openrlhf.cli.train_ppo_ray \
   --actor.model_name_or_path "$MODEL_PATH" \
   --actor.num_nodes "$NNODE" \
   --actor.num_gpus_per_node "$GPUS" \
+  --ref.num_nodes "$NNODE" \
+  --ref.num_gpus_per_node "$GPUS" \
   --train.colocate_all \
   --vllm.num_engines "$((GPUS / VLLM_TP))" \
   --vllm.tensor_parallel_size "$VLLM_TP" \
@@ -109,7 +111,7 @@ COMMAND=("${PYTHON:-python}" -m openrlhf.cli.train_ppo_ray \
   --rollout.batch_size "$PROMPTS_PER_ROLLOUT" \
   --rollout.n_samples_per_prompt "$GROUP_SIZE" \
   --train.batch_size "$((PROMPTS_PER_ROLLOUT * GROUP_SIZE))" \
-  --train.micro_batch_size "$((PROMPTS_PER_ROLLOUT * GROUP_SIZE))" \
+  --train.micro_batch_size 1 \
   --train.max_epochs 1 \
   --train.num_episodes "${NUM_EPISODES:-1}" \
   --train.dynamic_batch_enable \

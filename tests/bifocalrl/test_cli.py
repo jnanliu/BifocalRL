@@ -156,14 +156,24 @@ def test_invalid_eval_json_fails_before_training(eval_cli, tmp_path, settings):
 
 
 @pytest.mark.parametrize("config_via_env", [True, False])
-def test_run_script_preserves_json_defaults_and_explicit_environment_overrides(eval_cli, tmp_path, config_via_env):
+@pytest.mark.parametrize("recipe,nnodes,gpus", [
+    ("bifocalrl", 1, 8), ("circa", 1, 1), ("circa", 1, 2), ("circa", 2, 2),
+])
+def test_run_script_preserves_json_defaults_and_explicit_environment_overrides(
+    eval_cli, tmp_path, config_via_env, recipe, nnodes, gpus
+):
     root = Path(__file__).resolve().parents[2]
     capture = tmp_path / "capture-python"
     capture.write_text(f"#!{sys.executable}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n")
     capture.chmod(0o755)
     env = {key: value for key, value in os.environ.items() if not key.startswith("EVAL_")}
-    env.update(PYTHON=str(capture), MODEL_PATH="model with spaces", PROMPT_DATA="train.jsonl")
-    command = ["bash", str(root / "examples/bifocalrl/run.sh"), "bifocalrl"]
+    env.pop("KL_COEF", None)
+    env.pop("BIFOCAL_CONFIG", None)
+    env.update(
+        PYTHON=str(capture), MODEL_PATH="model with spaces", PROMPT_DATA="train.jsonl",
+        NNODE=str(nnodes), GPUS_PER_NODE=str(gpus), VLLM_TP_SIZE="1",
+    )
+    command = ["bash", str(root / "examples/bifocalrl/run.sh"), recipe]
     config = str(root / "examples/bifocalrl/eval_configs/math.json")
     expected = json.loads(Path(config).read_text())
     if config_via_env:
@@ -179,6 +189,10 @@ def test_run_script_preserves_json_defaults_and_explicit_environment_overrides(e
         assert printed.startswith("Running command: ")
         assert shlex.split(printed.removeprefix("Running command: ")) == [str(capture), *argv]
         args = eval_cli(argv[2:])
+        assert getattr(args, "ref.num_nodes") == getattr(args, "actor.num_nodes") == nnodes
+        assert getattr(args, "ref.num_gpus_per_node") == getattr(args, "actor.num_gpus_per_node") == gpus
+        assert getattr(args, "algo.kl.init_coef") == (0.005 if recipe == "circa" else 0)
+        assert getattr(args, "algo.kl.use_loss") is (recipe == "circa")
         assert getattr(args, "eval.temperature") == expected["temperature"]
         assert getattr(args, "eval.n_samples_per_prompt") == (2 if override else expected["n_samples_per_prompt"])
         assert getattr(args, "eval.dataset") == ("override.jsonl" if override else ",".join(expected["dataset"]))

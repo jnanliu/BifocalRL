@@ -9,6 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TOKENIZERS_PARALLELISM=false \
     VLLM_WORKER_MULTIPROC_METHOD=spawn \
     HF_HUB_CACHE=/project/huggingface \
+    HF_DATASETS_CACHE=/project/huggingface \
     HF_HUB_OFFLINE=1
 
 RUN apt-get update -qq \
@@ -131,5 +132,39 @@ RUN python -m pip uninstall -y \
         transformer-engine-cu12 transformer-engine-cu13 \
     && python -c \
         'from peft import LoraConfig; from openrlhf.models import Actor; print("PEFT and OpenRLHF Actor import OK")'
+
+# Configure tmux scrolling, pane navigation, and status for all container users.
+RUN printf '%s\n' \
+        'set -g mouse on' \
+        'set -g history-limit 100000' \
+        'set -g base-index 1' \
+        'setw -g pane-base-index 1' \
+        'set -g renumber-windows on' \
+        'bind | split-window -h -c "#{pane_current_path}"' \
+        'bind - split-window -v -c "#{pane_current_path}"' \
+        'bind c new-window -c "#{pane_current_path}"' \
+        'set -g status-left "[#S] "' \
+        'set -g status-right "#H | %m-%d %H:%M"' \
+        'set -g status-interval 5' \
+        'bind r source-file /etc/tmux.conf' \
+        >> /etc/tmux.conf
+
+# Share Oh My Zsh across root and runtime users, with writable per-user caches.
+RUN git clone --depth=1 https://github.com/ohmyzsh/ohmyzsh.git /opt/oh-my-zsh \
+    && git clone --depth=1 https://github.com/zsh-users/zsh-autosuggestions.git \
+        /opt/oh-my-zsh/custom/plugins/zsh-autosuggestions \
+    && git clone --depth=1 https://github.com/zsh-users/zsh-completions.git \
+        /opt/oh-my-zsh/custom/plugins/zsh-completions \
+    && chmod -R a+rX /opt/oh-my-zsh \
+    && printf '%s\n' \
+        'export ZSH=/opt/oh-my-zsh' \
+        'ZSH_THEME="robbyrussell"' \
+        'plugins=(git zsh-autosuggestions)' \
+        'fpath=("$ZSH/custom/plugins/zsh-completions/src" $fpath)' \
+        'ZSH_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/oh-my-zsh"' \
+        'zstyle ":omz:update" mode disabled' \
+        'source "$ZSH/oh-my-zsh.sh"' \
+        >> /etc/zsh/zshrc \
+    && zsh -n /etc/zsh/zshrc
 
 CMD ["sleep", "infinity"]
