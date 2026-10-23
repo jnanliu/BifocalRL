@@ -29,6 +29,17 @@
 依赖版本应以该 fork 的 `requirements.txt` 为准，包含 DeepSpeed、vLLM、Ray 和
 Transformers；不要覆盖旧 BifocalRL 的 Python 环境。无需转换成 Megatron checkpoint。
 
+数学判分依赖 `pebble>=5.1.3`，安装在训练 Python 环境中。同步代码不会更新运行中
+容器的 Python 依赖；旧容器请在启动 Ray 前使用训练所用的 Python 补齐依赖：
+
+```bash
+python -m pip install 'pebble>=5.1.3'
+python -c 'import sys, pebble; print(sys.executable, pebble.__file__)'
+```
+
+已经启动的训练任务及其 Ray worker 需要重新启动。Dockerfile 会显式安装该依赖，
+并在构建时检查数学判分和投票模块能否导入；使用镜像时需要重新构建并启动新容器。
+
 根目录 `Dockerfile` 在安装 vLLM 后调用 `examples/scripts/install_flash_attn.py`，
 从 [社区 wheel 索引](https://github.com/mjun0812/flash-attention-prebuild-wheels/blob/main/doc/packages.md)
 选择匹配 Python、CUDA、PyTorch 和平台标签的 FlashAttention 2.8.3 wheel。

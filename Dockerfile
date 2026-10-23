@@ -114,6 +114,11 @@ RUN python -m pip install --no-build-isolation \
 # Enable repository syncing to Maveric user space through S3 and Git LFS.
 RUN python -m pip install --no-cache-dir git-remote-s3
 
+# Install the CPU math timeout dependency in the training Python environment.
+RUN python -m pip install --no-cache-dir 'pebble>=5.1.3' \
+    && python -c \
+        'from openrlhf.algorithms.bifocalrl.legacy.math import grade; from openrlhf.algorithms.bifocalrl.voting import weighted_majority_voting; print("BifocalRL math dependencies import OK")'
+
 RUN git lfs install --system \
     && git config --system protocol.s3.allow always \
     && git config --system user.name "git-remote-s3 tests" \
