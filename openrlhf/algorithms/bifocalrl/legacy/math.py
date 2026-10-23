@@ -27,9 +27,7 @@ canonicalize answers before counting.
 
 from __future__ import annotations
 
-import os
 import re
-import signal
 from itertools import islice, zip_longest
 from math import isclose
 from typing import Any, Dict, Optional
@@ -38,6 +36,8 @@ import sympy
 from sympy import N, simplify
 from sympy.parsing import sympy_parser
 from sympy.parsing.sympy_parser import parse_expr
+
+from .timeout import _timeout_decorator
 
 _LATEX2SYMPY_AVAILABLE = False
 try:
@@ -70,60 +70,6 @@ try:
     _SYMPY_PARSE_LATEX_AVAILABLE = True
 except ImportError:
     parse_latex = None
-
-
-# ---------------------------------------------------------------------------
-# Timeout decorator (POSIX only)
-# ---------------------------------------------------------------------------
-
-
-def _timeout_decorator(timeout_seconds: int = 8):
-    if os.name == "posix":
-
-        def decorator(func):
-            def handler(signum, frame):
-                raise TimeoutError("Operation timed out!")
-
-            def wrapper(*args, **kwargs):
-                old_handler = signal.getsignal(signal.SIGALRM)
-                signal.signal(signal.SIGALRM, handler)
-                signal.alarm(timeout_seconds)
-                try:
-                    return func(*args, **kwargs)
-                finally:
-                    signal.alarm(0)
-                    signal.signal(signal.SIGALRM, old_handler)
-
-            return wrapper
-
-        return decorator
-    else:
-
-        def decorator(func):
-            return func
-
-        return decorator
-
-
-class _TimeoutCtx:
-    """Context-manager based timeout (POSIX only)."""
-
-    def __init__(self, seconds=1, error_message="Timeout"):
-        self.seconds = seconds
-        self.error_message = error_message
-
-    def handle_timeout(self, signum, frame):
-        raise TimeoutError(self.error_message)
-
-    def __enter__(self):
-        if os.name == "posix":
-            signal.signal(signal.SIGALRM, self.handle_timeout)
-            signal.alarm(self.seconds)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if os.name == "posix":
-            signal.alarm(0)
 
 
 # ---------------------------------------------------------------------------
@@ -780,56 +726,53 @@ def grade_answer_sympy(given_answer: str, ground_truth: str) -> bool:
     return True
 
 
+@_timeout_decorator(timeout_seconds=1)
 def is_latex_equal(given_answer: str, ground_truth: str) -> bool:
     """math_verify fallback comparison (requires math_verify + latex2sympy2_extended)."""
     if not _MATH_VERIFY_AVAILABLE:
         return False
     try:
-        with _TimeoutCtx(1):
-            try:
-                if (len(given_answer) > 128 and _repeatness(given_answer)) or (
-                    len(ground_truth) > 128 and _repeatness(ground_truth)
-                ):
-                    return False
-                gt_norm = _normalize(ground_truth)
-                given_norm = _normalize(given_answer)
-                if gt_norm is None:
-                    return False
-                if gt_norm == given_norm:
-                    return True
+        if (len(given_answer) > 128 and _repeatness(given_answer)) or (
+            len(ground_truth) > 128 and _repeatness(ground_truth)
+        ):
+            return False
+        gt_norm = _normalize(ground_truth)
+        given_norm = _normalize(given_answer)
+        if gt_norm is None:
+            return False
+        if gt_norm == given_norm:
+            return True
 
-                ga = given_answer.replace("\n", "")
-                gt = ground_truth.replace("\n", "")
-                if "$" not in ga:
-                    ga = f"${ga}$"
-                if "$" not in gt:
-                    gt = f"${gt}$"
-                return verify(
-                    parse(
-                        gt,
-                        extraction_config=(
-                            LatexExtractionConfig(boxed_match_priority=0),
-                            ExprExtractionConfig(),
-                        ),
-                        fallback_mode="no_fallback",
-                        extraction_mode=["first_match"],
-                        parsing_timeout=1,
-                    ),
-                    parse(
-                        ga,
-                        extraction_config=(
-                            LatexExtractionConfig(boxed_match_priority=0),
-                            ExprExtractionConfig(),
-                        ),
-                        fallback_mode="no_fallback",
-                        extraction_mode=["first_match"],
-                        parsing_timeout=1,
-                    ),
-                    timeout_seconds=1,
-                )
-            except Exception:
-                return False
-    except TimeoutError:
+        ga = given_answer.replace("\n", "")
+        gt = ground_truth.replace("\n", "")
+        if "$" not in ga:
+            ga = f"${ga}$"
+        if "$" not in gt:
+            gt = f"${gt}$"
+        return verify(
+            parse(
+                gt,
+                extraction_config=(
+                    LatexExtractionConfig(boxed_match_priority=0),
+                    ExprExtractionConfig(),
+                ),
+                fallback_mode="no_fallback",
+                extraction_mode=["first_match"],
+                parsing_timeout=None,
+            ),
+            parse(
+                ga,
+                extraction_config=(
+                    LatexExtractionConfig(boxed_match_priority=0),
+                    ExprExtractionConfig(),
+                ),
+                fallback_mode="no_fallback",
+                extraction_mode=["first_match"],
+                parsing_timeout=None,
+            ),
+            timeout_seconds=None,
+        )
+    except Exception:
         return False
 
 

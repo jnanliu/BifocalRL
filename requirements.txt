@@ -13,6 +13,7 @@ loralib
 optimum
 optree>=0.15.0
 packaging
+pebble>=5.1.3
 peft
 pylatexenc
 pynvml>=12.0.0

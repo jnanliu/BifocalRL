@@ -17,6 +17,8 @@ from sympy import simplify
 from sympy.parsing.sympy_parser import parse_expr
 from sympy.utilities.exceptions import SymPyDeprecationWarning
 
+from .timeout import _timeout_decorator
+
 _LATEX2SYMPY_AVAILABLE = False
 try:
     from latex2sympy2_extended import latex2sympy
@@ -95,38 +97,7 @@ def _simplify_with_suppressed_pow_warning(sympy_expr) -> str:
         return str(simplify(sympy_expr))
 
 
-def _timeout_decorator(timeout_seconds: int = 10):
-    import os
-    import signal
-
-    if os.name == "posix":
-
-        def decorator(func):
-            def handler(signum, frame):
-                raise TimeoutError("Operation timed out!")
-
-            def wrapper(*args, **kwargs):
-                old_handler = signal.getsignal(signal.SIGALRM)
-                signal.signal(signal.SIGALRM, handler)
-                signal.alarm(timeout_seconds)
-                try:
-                    return func(*args, **kwargs)
-                finally:
-                    signal.alarm(0)
-                    signal.signal(signal.SIGALRM, old_handler)
-
-            return wrapper
-
-        return decorator
-    else:
-
-        def decorator(func):
-            return func
-
-        return decorator
-
-
-@_timeout_decorator(timeout_seconds=10)
+@_timeout_decorator(timeout_seconds=10, fallback=lambda expression_string: expression_string.strip())
 def simplify_expression_string(expression_string: str) -> str:
     """Simplify a math expression to a canonical string form for MV counting."""
     expression_string = expression_string.strip()
