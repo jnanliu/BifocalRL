@@ -1,6 +1,6 @@
 {
   "dataset": ["datasets/aime24.jsonl", "datasets/aime25.jsonl", "datasets/amc.jsonl", "datasets/gpqa.jsonl", "datasets/livecodebench.jsonl"],
-  "split": "test",
+  "split": "train",
   "steps": 20,
   "temperature": 0.6,
   "n_samples_per_prompt": 8,
