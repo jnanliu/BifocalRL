@@ -126,6 +126,7 @@ COMMAND=("${PYTHON:-python}" -m openrlhf.cli.train_ppo_ray \
   --ckpt.output_dir "$OUTPUT_DIR/final" \
   --ckpt.path "$OUTPUT_DIR/checkpoints" \
   --ckpt.save_steps 20 \
+  --ckpt.max_num 3 \
   --ckpt.save_hf \
   --ckpt.disable_ds \
   --logger.tensorboard_dir "$OUTPUT_DIR/logs" \

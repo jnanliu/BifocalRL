@@ -304,7 +304,14 @@ async def generate_group(prompt, label, sampling_params, max_length, tokenizer, 
     else:
         responses = list(await asyncio.gather(*(generate(prompt_tokens) for _ in range(num_samples))))
     answers = extract_answers([r["response_text"] for r in responses])
-    if not evaluation and cfg["method"] == "bifocalrl":
+    specification = label if evaluation else None
+    if isinstance(specification, str):
+        try:
+            specification = json.loads(label)
+        except json.JSONDecodeError:
+            pass
+    backend = specification.get("backend", "math") if isinstance(specification, dict) else "math"
+    if backend == "math":
         representatives = []
         for response, answer in zip(responses, answers, strict=True):
             cluster = next(
@@ -315,19 +322,20 @@ async def generate_group(prompt, label, sampling_params, max_length, tokenizer, 
                 cluster = len(representatives)
                 representatives.append(answer)
             response["extra_logs"]["bifocal_answer_cluster"] = cluster
+    # Keep a uniform metadata schema when mathematical and code eval samples are batched.
+    for response, answer in zip(responses, answers, strict=True):
+        response["extra_logs"].setdefault("bifocal_answer_cluster", 0)
+        response["extra_logs"].update(
+            bifocal_answer_valid=float(backend == "math" and answer is not None),
+            bifocal_monitor_math=float(backend == "math"),
+            bifocal_monitor_correct=-1.0,
+        )
     seed = cfg["voting_seed"] + int(hashlib.sha256(prompt.encode()).hexdigest()[:16], 16)
     winner = weighted_majority_voting(answers, [1.0] * len(answers), rng=random.Random(seed)).selected_answer
     votes = [float(is_math_equivalent(answer, winner)) for answer in answers]
     if evaluation:
         from .legacy.math import grade
 
-        specification = label
-        if isinstance(label, str):
-            try:
-                specification = json.loads(label)
-            except json.JSONDecodeError:
-                pass
-        backend = specification.get("backend", "math") if isinstance(specification, dict) else "math"
         if backend == "sandbox_fusion":
             if not cfg["sandbox_fusion_url"]:
                 raise ValueError("Code evaluation requires --bifocal.sandbox_fusion_url or sandbox_fusion_url in JSON")
@@ -402,6 +410,20 @@ async def generate_group(prompt, label, sampling_params, max_length, tokenizer, 
         rewards = cluster_voting_rewards(answers, format_weight=cfg["circa_format_weight"])
     else:
         rewards = votes
+    # Labels are diagnostics only: never feed them into the intrinsic training reward.
+    if backend == "math" and (
+        evaluation or cfg.get("monitor_train_labels", False) and isinstance(label, str) and label.strip()
+    ):
+        if evaluation:
+            correctness = rewards
+        else:
+            from .legacy.math import grade
+
+            ground_truth = label.split("####")[-1].strip()
+            ground_truth = extract_answers([ground_truth])[0] or ground_truth
+            correctness = [float(answer is not None and grade(answer, ground_truth, fast=True)) for answer in answers]
+        for response, correct in zip(responses, correctness, strict=True):
+            response["extra_logs"]["bifocal_monitor_correct"] = correct
     for response, vote, reward in zip(responses, votes, rewards, strict=True):
         response.update(reward=float(reward), scores=float(reward))
         response["extra_logs"].update(bifocal_mv=vote, bifocal_aux=float(reward))

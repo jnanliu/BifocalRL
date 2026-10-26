@@ -168,6 +168,20 @@ def compute_eval_metrics(eval_dataloader, samples_list, n_samples_per_prompt):
             logs[f"eval_{ds}_truncated_rate"] = sum(m["truncated"]) / len(m["truncated"])
             total_truncated.extend(m["truncated"])
 
+        math_groups = [
+            g["samples"] for g in groups.values() if g["datasource"] == ds
+            and all(s.info.get("bifocal_monitor_math", torch.tensor(0)).item() == 1 for s in g["samples"])
+        ]
+        if math_groups:
+            from openrlhf.algorithms.bifocalrl.runtime import group_monitor_metrics
+
+            cluster_ids, valid, correct = (
+                torch.tensor([[s.info[f"bifocal_{key}"].item() for s in group] for group in math_groups])
+                for key in ("answer_cluster", "answer_valid", "monitor_correct")
+            )
+            diagnostics = group_monitor_metrics(cluster_ids.long(), valid, correct=correct)
+            logs.update({f"eval_{ds}_monitor/before/{key}": value for key, value in diagnostics.items()})
+
     if total_lengths:
         logs["eval_response_length_mean"] = sum(total_lengths) / len(total_lengths)
     if total_truncated:
@@ -297,6 +311,7 @@ class BasePPOTrainer(ABC):
 
         # Merge rollout stats (ground-truth, pre-dynamic-batch)
         status.update(rollout_stats)
+        status.update(getattr(self.experience_maker, "bifocal_monitor_metrics", {}))
 
         status["generated_samples"] = sample0
         return status, global_step + 1
@@ -637,6 +652,31 @@ class PPOTrainer(BasePPOTrainer):
 
         samples_list = self.samples_generator.generate_eval_samples(**generate_kwargs)
         logs = compute_eval_metrics(self.eval_dataloader, samples_list, generate_kwargs["n_samples_per_prompt"])
+
+        cfg = getattr(getattr(self.args, "bifocal", None), "settings", None)
+        if cfg and cfg.get("monitor_eval", True) and cfg["method"] in ("bifocalrl", "intuitor", "ttrl"):
+            # Reuse intrinsic advantage construction on a private copy, without optimizer updates.
+            maker = copy(self.experience_maker)
+            maker.strategy = copy(self.strategy)
+            maker.args = maker.strategy.args = deepcopy(self.args)
+            maker.initial_model_group = maker.critic_model_group = None
+            datasources = [ds for batch in self.eval_dataloader for ds in batch[0]]
+            by_source = {}
+            for sample in samples_list:
+                if sample.info.get("bifocal_monitor_math", torch.tensor(0)).item() == 1:
+                    prompt_index = int(sample.info["eval_prompt_index"].item())
+                    by_source.setdefault(datasources[prompt_index], []).append(sample)
+            for ds, samples in by_source.items():
+                count = int(samples[0].info["eval_n_samples_per_prompt"].item())
+                if count < 2:
+                    continue  # A relative advantage requires multiple responses per prompt.
+                samples = sorted(samples, key=lambda s: int(s.info["eval_prompt_index"].item()))
+                maker.args.rollout.n_samples_per_prompt = count
+                maker.make_experience_batch(deepcopy(samples))
+                logs.update({
+                    key.replace("bifocal_monitor/", f"eval_{ds}_monitor/", 1): value
+                    for key, value in maker.bifocal_monitor_metrics.items()
+                })
 
         end_time = time.time()
         duration = end_time - start_time

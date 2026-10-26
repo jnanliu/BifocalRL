@@ -153,3 +153,84 @@ def test_incomplete_group_is_rejected():
     exp = Experience(index=[0], rewards=torch.ones(1), action_mask=torch.ones(1, 1))
     with pytest.raises(ValueError, match="Incomplete"):
         assign_advantages(NS(strategy=NS(args=args)), [exp])
+
+
+def test_monitor_cluster_populations_and_correctness():
+    from openrlhf.algorithms.bifocalrl.runtime import group_monitor_metrics
+
+    ids = torch.tensor([[0, 0, 1, 2], [0, 1, 1, 2]])
+    valid = torch.tensor([[1, 1, 1, 0], [1, 1, 1, 0]])
+    sc = torch.tensor([[1., 3., 9., 100.], [5., 2., 4., 100.]])
+    correct = torch.tensor([[1., 1., 0., 0.], [0., 1., 1., 0.]])
+    advantages = torch.tensor([[1., -1., 2., 0.], [-2., 0., 1., 0.]])
+    result = group_monitor_metrics(ids, valid, sc, advantages, correct)
+    assert result['cluster_count'] == 4
+    assert result['cluster_size_mean'] == 1.5
+    assert result['singleton_cluster_fraction'] == .5
+    assert result['singleton_response_fraction'] == pytest.approx(1 / 3)
+    assert result['largest_cluster_fraction'] == pytest.approx(2 / 3)
+    assert result['parse_failure_rate'] == .25
+    assert result['correct_cluster_sc_mean'] == 2.5
+    assert result['incorrect_cluster_sc_mean'] == 7
+    assert result['correct_positive_advantage_fraction'] == .5
+    assert result['incorrect_positive_advantage_fraction'] == .5
+    assert result['correct_positive_cluster_advantage_fraction'] == .5
+    assert result['sc_within_rms'] == pytest.approx((4 / 6) ** .5)
+    keep = torch.tensor([[1, 0, 1, 0], [0, 0, 0, 0]])
+    retained = group_monitor_metrics(ids, valid, sc, advantages, correct, keep)
+    assert retained['cluster_count'] == 2
+    assert retained['empty_query_fraction'] == .5
+    assert retained['singleton_cluster_fraction'] == 1
+    assert retained['sc_within_rms'] == 0
+
+
+@pytest.mark.parametrize('filtered', [False, True])
+def test_monitor_empty_populations_omit_conditional_means(filtered):
+    from openrlhf.algorithms.bifocalrl.runtime import group_monitor_metrics
+
+    ids = torch.arange(4)[None, :]
+    result = group_monitor_metrics(
+        ids, torch.full((1, 4), filtered), sc=torch.ones(1, 4),
+        correct=torch.full((1, 4), -1), keep=torch.full((1, 4), not filtered),
+    )
+    assert result['cluster_count'] == result['labeled_response_count'] == 0
+    assert result['empty_query_fraction'] == 1
+    assert 'correct_cluster_sc_mean' not in result
+    assert 'singleton_cluster_fraction' not in result
+    assert 'sc_within_rms' not in result
+    assert all(torch.isfinite(torch.tensor(value)) for value in result.values())
+
+
+def test_monitor_uses_global_order_and_never_changes_advantages():
+    from copy import deepcopy
+
+    args = arguments()
+    args.bifocal.settings = deepcopy(DEFAULTS)
+    info = {
+        'bifocal_mv': torch.tensor([1., 1., 0., 0., 1., 1., 1., 0.]),
+        'bifocal_sc': torch.tensor([1., 2., 3., 4., 6., 4., 5., 1.]),
+        'bifocal_entropy': torch.ones(8),
+        'bifocal_answer_cluster': torch.tensor([0, 0, 1, 2, 0, 0, 0, 1]),
+        'bifocal_answer_valid': torch.ones(8),
+        'bifocal_monitor_correct': torch.tensor([1., 1., 0., 0., 0., 0., 0., 1.]),
+    }
+    whole = Experience(index=list(range(8)), rewards=info['bifocal_mv'].clone(),
+                       action_mask=torch.ones(8, 2), info=deepcopy(info))
+    original = deepcopy(whole)
+    del original.info['bifocal_answer_valid']
+    assign_advantages(NS(strategy=NS(args=args)), [original])
+    maker = NS(strategy=NS(args=args))
+    assign_advantages(maker, [whole])
+    torch.testing.assert_close(whole.advantages, original.advantages)
+    expected_metrics = maker.bifocal_monitor_metrics.copy()
+    split = [Experience(index=indices, rewards=whole.rewards[indices], action_mask=torch.ones(len(indices), 2),
+                        info={key: value[indices] for key, value in info.items()})
+             for indices in ([7, 3, 1], [6, 0, 5, 4, 2])]
+    assign_advantages(maker, split)
+    assert maker.bifocal_monitor_metrics == expected_metrics
+    for exp in split:
+        torch.testing.assert_close(exp.advantages, original.advantages[exp.index])
+    altered = deepcopy(whole)
+    altered.info['bifocal_monitor_correct'] = 1 - altered.info['bifocal_monitor_correct']
+    assign_advantages(maker, [altered])
+    torch.testing.assert_close(altered.advantages, original.advantages)

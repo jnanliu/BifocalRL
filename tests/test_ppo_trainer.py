@@ -341,3 +341,66 @@ def test_restore_checkpoint_metric_compatibility(ppo_module, state, best, latest
     trainer.restore_best_checkpoint_state(state)
     assert trainer.best_eval_metric_value == best
     assert trainer._latest_eval_metric_value == latest
+
+
+@pytest.mark.parametrize('enabled', [True, False])
+def test_eval_cluster_monitor_preserves_metrics_and_training_state(ppo_module, enabled):
+    from copy import deepcopy
+    from openrlhf.algorithms.bifocalrl.runtime import DEFAULTS, assign_advantages
+
+    calls = []
+
+    class Maker:
+        def make_experience_batch(self, samples):
+            calls.append((self.args.rollout.n_samples_per_prompt, len(samples)))
+            exp = SimpleNamespace(
+                index=list(range(len(samples))), rewards=torch.cat([s.rewards for s in samples]),
+                action_mask=torch.ones(len(samples), 1),
+                info={key: torch.cat([s.info[key] for s in samples]) for key in samples[0].info},
+            )
+            exp.info['bifocal_sc'] = torch.arange(len(samples)).float()
+            exp.info['bifocal_entropy'] = torch.ones(len(samples))
+            assign_advantages(self, [exp])
+
+    args = SimpleNamespace(
+        bifocal=SimpleNamespace(settings={**deepcopy(DEFAULTS), 'monitor_eval': enabled}),
+        rollout=SimpleNamespace(n_samples_per_prompt=16),
+    )
+    strategy = SimpleNamespace(args=args)
+    maker = Maker()
+    maker.args, maker.strategy = args, strategy
+    maker.bifocal_monitor_metrics = {'training_metric': 123}
+    maker.initial_model_group, maker.critic_model_group = 'reference', 'critic'
+    loader = [(['math2', 'math4', 'code'], ['q0', 'q1', 'q2'], ['1', '1', '{}'], [None] * 3)]
+    samples = []
+    for index, n in enumerate([2, 4, 2]):
+        for j in range(n):
+            correct = float(j == 0)
+            samples.append(SimpleNamespace(
+                prompts=[f'q{index}'], rewards=torch.tensor([correct]), response_length=None, truncated=None,
+                info={
+                    'eval_prompt_index': torch.tensor([index]), 'eval_n_samples_per_prompt': torch.tensor([n]),
+                    'bifocal_answer_cluster': torch.tensor([j % 2]), 'bifocal_answer_valid': torch.tensor([1.]),
+                    'bifocal_monitor_math': torch.tensor([float(index != 2)]),
+                    'bifocal_monitor_correct': torch.tensor([correct]), 'bifocal_mv': torch.tensor([float(j % 2 == 0)]),
+                },
+            ))
+    # Tagged prompt groups may arrive out of order.
+    samples = samples[::-1]
+    trainer = object.__new__(ppo_module.PPOTrainer)
+    trainer.args, trainer.strategy, trainer.experience_maker = args, strategy, maker
+    trainer.eval_dataloader = loader
+    trainer.samples_generator = SimpleNamespace(generate_eval_samples=lambda **_: samples)
+    expected = ppo_module.compute_eval_metrics(loader, samples, 2)
+    logs = trainer.evaluate(0, n_samples_per_prompt=2)
+    for key, value in expected.items():
+        assert logs[key] == pytest.approx(value)
+    assert logs['eval_math4_monitor/before/cluster_count'] == 2
+    assert not any(key.startswith('eval_code_monitor') for key in logs)
+    assert ('eval_math2_monitor/retained/correct_positive_advantage_fraction' in logs) == enabled
+    assert sorted(calls) == ([(2, 2), (4, 4)] if enabled else [])
+    assert maker.args.rollout.n_samples_per_prompt == 16
+    assert maker.initial_model_group == 'reference' and maker.critic_model_group == 'critic'
+    assert maker.bifocal_monitor_metrics == {'training_metric': 123}
+    assert all('bifocal_sc' not in s.info for s in samples)
+    assert all(s.rewards.item() == s.info['bifocal_monitor_correct'].item() for s in samples)

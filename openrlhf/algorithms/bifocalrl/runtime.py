@@ -42,6 +42,8 @@ DEFAULTS = {
     "score_concurrency": 16,
     "voting_seed": 42,
     "eval_label_key": "label",
+    "monitor_eval": True,
+    "monitor_train_labels": False,
     "sandbox_fusion_url": None,
     "sandbox_timeout": 10,
     "sandbox_memory_limit_mb": 1024,
@@ -85,6 +87,9 @@ def configure(args):
             raise ValueError(f"Method {cfg['method']} requires mixed.alpha_mode={mode!r}")
         cfg["mixed"]["alpha_mode"] = mode
     MixedRewardConfig(**cfg["mixed"])
+    for key in ("monitor_eval", "monitor_train_labels"):
+        if not isinstance(cfg[key], bool):
+            raise ValueError(f"{key} must be a boolean")
     if not math.isfinite(cfg["sandbox_timeout"]) or cfg["sandbox_timeout"] <= 0:
         raise ValueError("sandbox_timeout must be finite and positive")
     if not isinstance(cfg["sandbox_memory_limit_mb"], int) or cfg["sandbox_memory_limit_mb"] < 1:
@@ -155,6 +160,64 @@ def configure(args):
 
 
 @torch.no_grad()
+def group_monitor_metrics(cluster_ids, valid, sc=None, advantages=None, correct=None, keep=None):
+    """Aggregate prompt-local answer clusters; conditional means omit empty populations."""
+    selected = torch.ones_like(valid, dtype=torch.bool) if keep is None else keep.bool()
+    valid = valid.bool() & selected
+    counts = torch.zeros_like(cluster_ids, dtype=torch.float32)
+    counts.scatter_add_(1, cluster_ids.long(), valid.float())
+    occupied = counts > 0
+    sizes = counts[occupied]
+    totals = counts.sum(-1)
+    active = totals > 0
+    metrics = {
+        "query_count": float(len(counts)),
+        "selected_response_count": selected.sum().item(),
+        "valid_response_count": valid.sum().item(),
+        "cluster_count": occupied.sum().item(),
+        "clusters_per_query": occupied.sum(-1).float().mean().item(),
+        "empty_query_fraction": (~active).float().mean().item(),
+    }
+    if selected.any():
+        metrics["parse_failure_rate"] = (~valid & selected).sum().item() / selected.sum().item()
+    if active.any():
+        probabilities = counts[active] / totals[active, None]
+        metrics["largest_cluster_fraction"] = probabilities.max(-1).values.mean().item()
+        metrics["answer_entropy"] = -(probabilities * probabilities.clamp_min(1e-12).log()).sum(-1).mean().item()
+        metrics["cluster_size_mean"] = sizes.mean().item()
+        metrics["singleton_cluster_fraction"] = (sizes == 1).float().mean().item()
+        metrics["singleton_response_fraction"] = (sizes == 1).sum().item() / valid.sum().item()
+        for lower, upper, name in ((2, 2, "2"), (3, 4, "3_4"), (5, 8, "5_8"), (9, float("inf"), "9_plus")):
+            metrics[f"cluster_size_fraction_{name}"] = ((sizes >= lower) & (sizes <= upper)).float().mean().item()
+    if sc is not None and valid.any():
+        sums = torch.zeros_like(counts).scatter_add_(1, cluster_ids.long(), sc.masked_fill(~valid, 0))
+        means = sums / counts.clamp_min(1)
+        within = (sc - means.gather(1, cluster_ids.long()))[valid]
+        metrics["sc_within_rms"] = within.square().mean().sqrt().item()
+        metrics["sc_within_abs_mean"] = within.abs().mean().item()
+    if correct is not None:
+        labeled = valid & (correct >= 0)
+        metrics["labeled_response_count"] = labeled.sum().item()
+        for value, name in ((1, "correct"), (0, "incorrect")):
+            mask = labeled & (correct == value)
+            class_counts = torch.zeros_like(counts).scatter_add_(1, cluster_ids.long(), mask.float())
+            # A cluster is classifiable only when all its selected members share a known label.
+            clusters = occupied & (class_counts == counts)
+            metrics[f"{name}_response_count"] = mask.sum().item()
+            metrics[f"{name}_cluster_count"] = clusters.sum().item()
+            if sc is not None and mask.any():
+                metrics[f"{name}_sc_mean"] = sc[mask].mean().item()
+                if clusters.any():
+                    metrics[f"{name}_cluster_sc_mean"] = means[clusters].mean().item()
+            if advantages is not None and mask.any():
+                metrics[f"{name}_positive_advantage_fraction"] = (advantages[mask] > 0).float().mean().item()
+                if clusters.any():
+                    adv_sums = torch.zeros_like(counts).scatter_add_(1, cluster_ids.long(), advantages.masked_fill(~valid, 0))
+                    metrics[f"{name}_positive_cluster_advantage_fraction"] = (adv_sums[clusters] > 0).float().mean().item()
+    return metrics
+
+
+@torch.no_grad()
 def assign_advantages(maker, experiences):
     """Restore original rollout order before query and batch normalization."""
     args = maker.strategy.args
@@ -167,14 +230,17 @@ def assign_advantages(maker, experiences):
     if len(indices) % group_size:
         raise ValueError("Incomplete BifocalRL prompt group")
     scores = {}
+    maker.bifocal_monitor_metrics = {}
     score_names = ("mv", "sc", "entropy", "aux")
-    if cfg["method"] == "bifocalrl":
+    monitor = all("bifocal_answer_valid" in exp.info for exp in experiences)
+    if cfg["method"] == "bifocalrl" or monitor:
         score_names += ("answer_cluster",)
+    if monitor:
+        score_names += ("answer_valid", "monitor_correct")
     for name in score_names:
         key = f"bifocal_{name}"
         required = (
-            name == "mv"
-            or name == "answer_cluster"
+            name in ("mv", "answer_cluster", "answer_valid", "monitor_correct")
             or (name in ("sc", "entropy") and cfg["method"] not in ("ttrl", "covo"))
             or (name == "aux" and cfg["method"] in ("prism", "covo", "circa"))
         )
@@ -248,6 +314,27 @@ def assign_advantages(maker, experiences):
         for exp in experiences:
             exp.advantages = (exp.advantages - mean) * (variance + 1e-8).rsqrt() * exp.action_mask
             exp.returns = exp.advantages.clone()
+    if monitor:
+        final_advantages = torch.empty(len(indices))
+        for exp in experiences:
+            final_advantages[exp.index] = (exp.advantages * exp.action_mask).sum(-1) / exp.action_mask.sum(-1)
+        monitor_args = dict(
+            cluster_ids=scores["answer_cluster"], valid=scores["answer_valid"],
+            sc=scores["sc"] if cfg["method"] not in ("ttrl", "covo") else None,
+            advantages=final_advantages.reshape(-1, group_size), correct=scores["monitor_correct"],
+        )
+        before = group_monitor_metrics(**monitor_args)
+        after = group_monitor_metrics(**monitor_args, keep=diagnostics["rollout_keep"] if diagnostics else None)
+        maker.bifocal_monitor_metrics = {
+            **{f"bifocal_monitor/before/{key}": value for key, value in before.items()},
+            **{f"bifocal_monitor/retained/{key}": value for key, value in after.items()},
+        }
+        if diagnostics:
+            kept = diagnostics["rollout_keep"].bool() & scores["answer_valid"].bool()
+            if kept.any():
+                maker.bifocal_monitor_metrics["bifocal_monitor/retained/sc_adv_within_rms"] = (
+                    diagnostics["sc_within"][kept].square().mean().sqrt().item()
+                )
     logger.info(
         "BifocalRL %s: prompts=%d samples=%d MV=%.4f SCE=%.4f entropy=%.4f aux=%.4f gamma=%.4f",
         cfg["method"],

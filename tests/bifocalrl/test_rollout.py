@@ -590,3 +590,20 @@ def test_rollout_records_survive_native_experience_padding_and_batching(method):
     assert batch.action_mask[:, 0].tolist() == [1] * 5
     if method == "bifocalrl":
         assert batch.info["bifocal_answer_cluster"].tolist() == [0, 1, 1, 1, 1]
+
+
+@pytest.mark.parametrize('evaluation,monitor_train', [(False, False), (False, True), (True, False)])
+def test_correctness_monitor_does_not_change_intrinsic_rewards(evaluation, monitor_train):
+    params = SamplingParams(extra_args={
+        'bifocal': {**DEFAULTS, 'method': 'intuitor', 'monitor_train_labels': monitor_train},
+        'bifocal_evaluation': evaluation,
+    })
+    output = asyncio.run(generate_group(
+        'q', '2', params, 128, Tokenizer(),
+        Engine([r'\boxed{1}', r'\boxed{1}', r'\boxed{2}', 'no answer']), 4,
+    ))
+    assert [r['extra_logs']['bifocal_answer_valid'] for r in output] == [1, 1, 1, 0]
+    assert [r['extra_logs']['bifocal_monitor_correct'] for r in output] == (
+        [0, 0, 1, 0] if evaluation or monitor_train else [-1] * 4
+    )
+    assert [r['reward'] for r in output] == ([0, 0, 1, 0] if evaluation else [1, 1, 0, 0])

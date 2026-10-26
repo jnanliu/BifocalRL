@@ -450,6 +450,50 @@ async def score(config, sample):
   需要 reference KL 时使用 `--algo.kl.use_loss --algo.kl.init_coef ...`。
 - 续训沿用原生 `--ckpt.load_enable`，保持算法 JSON 与原运行一致。
 
+### 答案簇与 SC 监控
+
+TensorBoard/W&B 自动记录以下 scalar。训练前缀为
+`train/bifocal_monitor/{before,retained}/`；数学评估前缀为
+`eval/eval_<datasource>_monitor/{before,retained}/`。
+`before` 使用进入优势计算的完整 group，`retained` 使用 GD²PO 保留集合；
+没有 GD²PO filtering 的方法两者集合相同。这里的 before 不包含已被原生
+dynamic filtering 丢弃的 prompt。
+
+| 指标后缀 | 含义 |
+| --- | --- |
+| `clusters_per_query`, `largest_cluster_fraction`, `answer_entropy` | 每题答案簇数、最大簇占有效回答比例、答案分布熵（自然对数） |
+| `cluster_size_mean`, `singleton_cluster_fraction`, `singleton_response_fraction` | 簇大小均值、单样本簇占全部簇的比例、单样本簇回答占有效回答的比例 |
+| `cluster_size_fraction_{2,3_4,5_8,9_plus}` | 簇大小分桶比例；大小 1 使用 singleton 指标 |
+| `sc_within_rms`, `sc_within_abs_mean` | 原始 SC 减去同答案簇均值后的 RMS、绝对值均值 |
+| `sc_adv_within_rms` | BifocalRL 保留集合内、group-normalized SC 的簇内分量 RMS |
+| `{correct,incorrect}_cluster_sc_mean` | 正确/错误答案簇的原始 SC 均值，簇等权 |
+| `{correct,incorrect}_sc_mean` | 正确/错误回答的原始 SC 均值，回答等权 |
+| `{correct,incorrect}_positive_advantage_fraction` | 正确/错误回答中最终 advantage > 0 的比例 |
+| `{correct,incorrect}_positive_cluster_advantage_fraction` | 正确/错误簇中平均最终 advantage > 0 的簇比例 |
+| `query_count`, `selected_response_count`, `valid_response_count`, `cluster_count` | 各统计口径的样本量 |
+| `labeled_response_count`, `{correct,incorrect}_{response,cluster}_count` | 有标签的有效回答数、正确/错误回答数与簇数 |
+| `parse_failure_rate`, `empty_query_fraction` | 所选回答的解析失败率、没有有效回答的 query 比例 |
+
+答案簇复用数学等价判断；解析失败不作为有效答案簇。簇数按所有 query
+取平均，最大簇比例和熵只对非空 query 取平均；簇大小统计对全部簇等权。
+正确性统计只包含已解析且有标签的回答；整个簇的标签一致才计入正确/错误簇。
+没有对应样本时省略条件均值/比例，并记录数量为 0，避免伪造零值。
+`before` 中的 advantage 仍是最终训练 advantage，已过滤回答的 advantage 为 0。
+
+训练标签默认完全不读取。需要训练集正确性诊断时，在算法 JSON 添加
+`"monitor_train_labels": true`，并通过 `--data.label_key label` 提供数学标签；
+标签仅用于监控，不参与 MV、SC、filtering 或 advantage 计算。
+无标签训练仍会记录多样性、保留簇大小和 SC 簇内幅度。
+
+BifocalRL、Intuitor 和 TTRL 的数学评估默认额外执行 actor 前向，并对每个
+datasource 按该数据源自己的采样数计算诊断 advantage。该值模拟当前策略的
+内在奖励训练规则，以该数据源的全部评估样本作为 normalization batch，
+不是训练时实际应用的 advantage；不会反向传播，也不改变 pass@k。
+每题只有一个回答时仅记录答案簇统计。TTRL 不计算 SC，因此不输出 SC 指标。
+其他方法和 Sandbox Fusion 代码评估不执行这次诊断前向；代码不使用数学答案聚类。
+可在算法 JSON 设置 `"monitor_eval": false` 关闭额外前向以降低评估开销，
+数学评估的答案簇和正确性数量统计仍保留。
+
 代码入口：`openrlhf/algorithms/bifocalrl/runtime.py`（配置与全局优势）、
 `rollout.py`（vLLM 分组、ETMR/CoVo/PRISM）、`methods.py`（纯公式）、
 `mixed_reward/`（原融合注册表）。增加融合策略可用原 `register_mixed_reward_mode`。
